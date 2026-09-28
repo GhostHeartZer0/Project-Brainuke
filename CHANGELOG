@@ -1,0 +1,350 @@
+# CHANGELOG
+
+## [0.8.0] - 2026-09-28
+
+- `.gitignore`:
+  - Created repository ignore filters for TLS private keys and certs (`*.key`, `*.pem`, `*.crt`), database files (`data/*.db*`), large model weights (`models/**/*.gguf`), Android build caches (`app/build/`, `.gradle/`), IDE configs, and screen captures.
+- `brainuke_core/cognition/llama_client.py`:
+  - Added missing `Any` import from `typing`.
+- `TODO.txt`:
+  - Added security audit findings for zero-touch pairing authentication, self-healing authorization gates, hostname verification, and CA server access.
+
+## [0.7.0] - 2026-09-27
+
+- `brainuke_extension/app/src/main/res/` & `AndroidManifest.xml`:
+  - Generated full Android app launcher icon suite from `data/Cecilia_01_ico.ico`:
+    - Standard density icons (`ic_launcher.png`) across `mipmap-mdpi` (48x48), `mipmap-hdpi` (72x72), `mipmap-xhdpi` (96x96), `mipmap-xxhdpi` (144x144), and `mipmap-xxxhdpi` (192x192).
+    - Circular masked icons (`ic_launcher_round.png`) across all densities for rounded OEM launchers.
+    - Adaptive icon foreground layers (`ic_launcher_foreground.png`) framed within the 72dp safe zone.
+    - Adaptive icon XML definitions (`ic_launcher.xml` and `ic_launcher_round.xml`) under `mipmap-anydpi-v26` paired with emerald dark theme background (`#1A4335`).
+  - Linked `android:icon="@mipmap/ic_launcher"` and `android:roundIcon="@mipmap/ic_launcher_round"` to `<application>` and `<activity android:name=".MainActivity">`.
+  - Verified resource compilation via Gradle `processDebugResources`.
+
+- `brainuke_core/memory/vault.py`:
+  - Updated default Android companion influence weight from 0.7 to 0.35 (Tether).
+  - Executed database scrub on `data/brainuke_master.db`: purged 49 repeated offline status pings, removed degenerate token loop insight, scrubbed test/filler dialogues, and inserted 3 canonical DMN refined insights (`#ARCHITECTURE`, `#TACTICAL_ANALYSIS`, `#SENSORY`).
+- `brainuke_throne/server/main.py`:
+  - Updated `POST /api/v1/sync/push` companion ingest weight to 0.35.
+  - Updated `GET /api/v1/history` weight metadata to `pc_master: 1.0`, `android_companion: 0.35`, `telemetry_oracle: 0.2`.
+- `brainuke_throne/ui_desktop/cecilia_ui.py`:
+  - Updated stage tab bar priority badge: `👑 PC Core (Weight 1.0) ≫ 📱 Android (Weight 0.35)`.
+  - Updated filter pill label from `📱 Android (0.7)` to `📱 Android (0.35)`.
+  - Updated history feed formatter to support 2-decimal weight display (`0.35`).
+  - Updated diagnostics card text to reflect PC Core Master (1.0) > Droid (0.35).
+- `brainuke_core/cognition/llama_client.py`:
+  - Added `repeat_penalty: 1.15` and `repeat_last_n: 64` to `generate_text` payload.
+  - Added `"<|channel>"` stop token to `DEFAULT_STOP`.
+- `brainuke_core/cognition/deep_cook.py`:
+  - Structured DMN distillation prompt using official Gemma 4 chat templating.
+  - Added `_sanitize_insight` to detect and strip degenerate repetition loops and leaked channel tags.
+- `brainuke_core/cognition/simmer_bus.py`:
+  - Suppressed archiving `[PC Core Offline]` error notices as distilled memory insights; falls back to deterministic summary.
+  - Added deduplication gate to prevent archiving identical consecutive insights.
+- `tests/test_ui_history.py` & `tests/test_sync_and_weighting.py`:
+  - Updated test assertions for 0.35 companion influence weight and telemetry oracle weighting.
+- `weird output.txt`:
+  - Replaced corrupted/repetitive log with distilled high-density stream and DMN insights.
+
+## [Unreleased] - 2026-09-26
+
+- `brainuke_throne/ui_desktop/cecilia_ui.py`:
+  - Added dual-stage deck navigation with `💬 Live Cognitive Stage` and `📜 Memory & DMN History` tabs.
+  - Implemented History Tab showing chronological memory feed of interaction dialogues and DMN refined insights.
+  - Enforced prominent visual hierarchy: PC Cecilia turns tagged with `[👑 PC CORE MASTER • WEIGHT 1.0 (CANON)]` and Android companion turns tagged with `[📱 ANDROID COMPANION • WEIGHT 0.7]`.
+  - Displayed DMN refined insights tagged with `[⚡ DMN REFINED INSIGHT]` detailing concept family, importance weight, dominance weight, and world delta summary.
+  - Added filter pills (`All Records`, `👑 PC Master (1.0)`, `📱 Android (0.7)`, `⚡ DMN Refined`), item count badge, refresh button, and automated background refresh on tab switch, interact completion, DMN simmer ack, and sync alignment.
+- `brainuke_throne/server/main.py`:
+  - Added `GET /api/v1/history` endpoint with machine token authentication, supporting `limit` and `filter` (`all`, `pc`, `android`, `dmn`) query parameters, returning combined interactions and DMN insights along with master/companion influence weights (`pc_master: 1.0`, `android_companion: 0.7`).
+- `brainuke_core/memory/vault.py`:
+  - Added optional `source_device` filtering parameter to `get_recent_interactions()`.
+  - Added `get_distilled_insights()` helper method.
+- `tests/test_ui_history.py` & `tests/test_sync_and_weighting.py`:
+  - Added unit test coverage for History tab stage switching, feed rendering, weighting badges, DMN refined tag formatting, and `GET /api/v1/history` endpoint filters.
+
+- `brainuke_throne/ui_desktop/cecilia_ui.py`:
+  - Renamed sidebar card title from `DISCUSSION THREADS` to `MESSAGEBOARD`.
+  - Added token diversion in `_append_speech_chunk` intercepting any `[DECONSTRUCTION]`, `[MOTIVE]`, `[SUBTEXT]`, etc., chunks and routing them to the collapsible thought drawer.
+  - Enhanced `_finalize_streaming_turn` with `ThoughtIsolation().isolate()` to enforce zero deconstruction leakage in speech bubbles.
+  - Increased cognitive interaction timeout to 120s and added `interact_error` event handling to reset `is_streaming` state cleanly upon read timeout.
+- `brainuke_core/cognition/orchestrator.py`:
+  - Fixed thought closing tag from `<|thought|>` to `</|thought|>` in Phase 3 prompt, eliminating prompt confusion that caused model to emit deconstruction in speech mode.
+  - Capped Phase 2 reasoning `n_predict=512` to eliminate latency timeouts.
+  - Added in-flight thought detection during Phase 3 streaming to divert reasoning tokens to `on_thought_chunk`.
+  - Added auto-synthesis fallback if model outputs pure deconstruction.
+- `brainuke_core/cognition/thought_isolation.py`:
+  - Enhanced `ThoughtIsolation` to isolate multi-paragraph reasoning sections, analytical headers, and bullet points while preserving authentic spoken dialogue.
+- `tests/test_sync_and_weighting.py` & `tests/test_thought_isolation.py`:
+  - Updated test assertions for `</|thought|>` closing tag and added unit test coverage for multi-paragraph deconstruction isolation.
+
+- `brainuke_throne/server/main.py`:
+  - Decoupled `POST /api/v1/sync/trigger` and `POST /api/v1/sync/simmer` into non-blocking background tasks, eliminating HTTP client read timeouts caused by heavy LLM distillation on port 8081.
+  - Implemented live `status` tracking (`in_progress` vs `idle`) in `last_sync_info`, broadcasting `sync_update` and `dmn_status` over SSE Downlink.
+  - Added `sync_status`, `is_simmering`, and `last_simmer` fields to `/api/v1/cognitive/status` and `/api/v1/sync/status`.
+- `brainuke_core/cognition/simmer_bus.py`:
+  - Added `status_fn` async callback to emit `dmn_status` (`simmering` vs `idle`) and tracked `last_simmer_time`.
+- `brainuke_core/cognition/deep_cook.py`:
+  - Capped distillation LLM calls to `n_predict=256` to accelerate DMN synthesis from ~40s to ~3-5s.
+- `brainuke_throne/ui_desktop/cecilia_ui.py`:
+  - Implemented dynamic "In Progress" vs "Finished" states for both Sync and DMN Simmer:
+    - Syncing: Top label displays `Syncing in progress... ⏳` and sidebar shows `• Last Sync: In progress... ⏳` (gold), with `🔄 Sync` disabled.
+    - Synced: Labels transition to `Last Sync: HH:MM:SS` (mint green) and button re-enables.
+    - Simmering: Sidebar shows `• DMN Simmer: Simmering... ⏳` (gold) and `⚡ Simmer DMN` disables to `⚡ Simmering...`.
+    - Simmered: Shows `• DMN Simmer: Idle (Last: HH:MM:SS)` and button re-enables.
+  - Increased HTTP client timeouts for sync and simmer to 60s as a secondary safeguard.
+- `tests/test_sync_and_weighting.py`:
+  - Added unit test coverage for async non-blocking simmer and trigger in-progress states.
+
+- `brainuke_core/cognition/llama_client.py`:
+  - Increased `n_predict` default from 256/160 to 2048 in `generate_text` and `generate_stream`, eliminating abrupt conversational cutoffs.
+  - Updated `DEFAULT_STOP` to `["<turn|>", "<end_of_turn>", "<|turn>user", "<|turn>system", "<eos>", "<|end|>"]`.
+- `brainuke_core/cognition/thought_isolation.py`:
+  - Hardened regex patterns (`\[REASONING ENGINE[^\]]*\].*?\n`, `\[ANALYSIS_START\]`, `<\|thought\|>`, `<turn|>`, etc.) to guarantee zero prompt deconstruction leakage into speech.
+- `brainuke_core/cognition/orchestrator.py`:
+  - Upgraded prompts to official Gemma 4 chat templating (`<bos><|turn>system...<turn|>\n<|turn>user...<turn|>\n<|turn>model\n<|thought|>\n`).
+  - Closed reasoning thought channel inside `<|thought|>\n{thought_stream}\n<|thought|>\n` prior to persona speech generation, preventing prompt mimicry and format regurgitation.
+  - Implemented token-by-token live streaming via `on_speech_chunk` and `on_thought_chunk`.
+- `brainuke_throne/server/main.py`:
+  - Hooked `_on_thought_chunk` and `_on_speech_chunk` to broadcast `thought_chunk` and `speech_chunk` events over Downlink SSE in real time.
+- `brainuke_throne/ui_desktop/cecilia_ui.py`:
+  - Implemented live token streaming to chat: dynamically renders streaming thought chunks into the collapsible reasoning drawer and streams speech chunks directly into the active chat bubble.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/`:
+  - Added `BrainukeEvent.ThoughtChunk` and `BrainukeEvent.SpeechChunk` models in `BrainukeModels.kt` with SSE deserialization.
+  - Connected chunk events in `SensoryService.kt` and `MainActivity.kt` for live mobile UI streaming.
+- `tests/test_sync_and_weighting.py`:
+  - Added unit tests for streaming callbacks, prompt thought encapsulation, and ThoughtIsolation leak patterns.
+- `brainuke_core/cognition/llama_client.py`:
+  - Replaced prompt directive dumping in offline/timeout fallback with clean diagnostic error message, preventing system prompt leakage into chat interface.
+  - Replaced simulated offline thoughts with clean diagnostic status.
+- `brainuke_core/memory/vault.py`:
+  - Added `source_device` and `influence_weight` schema columns to `interaction_history` with automated migration.
+  - Applied hierarchical weighting: PC primary core interactions default to weight 1.0; Android companion interactions default to weight 0.7.
+- `brainuke_throne/server/main.py`:
+  - Added `last_sync_info` tracking and endpoints: `POST /api/v1/sync/trigger` (SSE Downlink `sync_request` broadcast + DMN memory consolidation) and `GET /api/v1/sync/status`.
+  - Added sync timestamps and summary to `GET /api/v1/cognitive/status`.
+  - Updated `POST /api/v1/sync/push` to batch-ingest mobile dialogue turns with weight 0.7 and broadcast `sync_update`.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/model/BrainukeModels.kt`:
+  - Added `BrainukeEvent.SyncRequest` and `BrainukeEvent.SyncUpdate` sealed class events with SSE deserialization.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/service/SensoryService.kt`:
+  - Connected `BrainukeEvent.SyncRequest` in downlink collector to auto-invoke `syncRepository.executeSync(client)`.
+- `brainuke_throne/ui_desktop/cecilia_ui.py`:
+  - Added top header `🔄 Sync` button and live `Last Sync: [time]` status label.
+  - Removed raw affect vector (VAD) gauges from main view to keep telemetry internal.
+  - Replaced Cognitive Nexus with comprehensive `SYSTEM STATUS & DIAGNOSTICS` card showing PC core model, port 8081 health, sampling parameters, priority weighting (PC 1.0 > Mobile 0.7), Downlink SSE, ADB reverse tethering, last sync, DMN simmer state, and grounding nodes.
+  - Updated message bubbles so internal reasoning thoughts are always nested inside collapsible dropdown drawer (`▶ Internal Reasoning (click to expand)`).
+  - Streamlined bottom toolbar to clean action set (`⚡ Simmer DMN`, `⚙ Model & Config`, `🩺 Self-Heal / Debug`, `🧹 Clear View`). Moved `Perceptual Snap` and `Reset Slot` to the `Model & Config` dialog.
+  - Added 30-attempt polling loop in model loader to resolve race conditions while 26B GGUF loads into VRAM.
+- `tests/test_sync_and_weighting.py`:
+  - Added unit test suite verifying memory vault influence weighting, fallback directive isolation, and sync endpoints.
+- `brainuke_core/cognition/runner_manager.py`:
+  - Added dynamic executable discovery `find_llama_server_binary()` resolving `llama-server.exe` across local PATH and Android Studio's bundled runtime (`C:\Program Files\Android\Android Studio\plugins\gemini\resources\llamacpp\llama-server.exe`).
+  - Added `-np 1 --no-warmup` to PC runner launch flags, preventing RTX 3050 CUDA out-of-memory crashes caused by default 4-slot parallel allocation and warmup KV caching.
+  - Added `auto_reload=False` guards to `select_model` and `initiate_load` to eliminate mutual recursion deadlock during model swaps.
+- `brainuke_throne/tls/provisioner.py`: Added non-blocking `ensure_adb_reverse()` executing `adb reverse` for TCP ports 8443 (HTTPS Throne API), 8080 (Root CA Downloader), and 8081 (Inference Downlink) without pipe-blocking subprocess hangs.
+- `brainuke_throne/server/main.py`: Hooked `TLSProvisioner.ensure_adb_reverse()` into `run_throne()` startup sequence for automated mobile tethering.
+- `brainuke_throne/ui_desktop/cecilia_ui.py`: Added `_ensure_throne_server_running()` probe and background spawn fallback to auto-start Throne server when closed, resolving `WinError 10061` connection refused errors on desktop UI launch and model control actions.
+- `start_ui.ps1` & `start_ui.bat`: Updated desktop launch scripts to auto-forward ADB reverse ports and verify port 8443 before spawning desktop UI.
+- `start_llama_server.bat`: Generated with discovered `llama-server.exe` path and `-np 1 --no-warmup` flags.
+- `brainuke_core/cognition/llama_client.py` & `orchestrator.py`: Added explicit Gemma 4 stop sequences (`<end_of_turn>`, `<turn|>`) and bounded `n_predict` limits to prevent runaway completions.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/inference/LocalInferenceEngine.kt`: Unified persona engine prompts by anchoring both Normal and Secret modes directly to `CECILIA_CORE_PROMPT`. Purged bland polite assistant platitudes from `CECILIA_NORMAL_SYSTEM_PROMPT` and offline reflex fallbacks, infusing authentic Fallen Angel wit, sarcasm, protective vigilance, and observant honesty across all modes.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/model/BrainukeModels.kt`: Updated `ModelType.NORMAL` description to reflect mobile companion fallen angel core persona.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/inference/LocalInferenceEngine.kt`: Integrated Qualcomm Genie X SDK (`com.qualcomm.qti:geniex-android:0.3.16`) referencing `SerenityDroid`. Routes Gemma 4 GGUF models directly to Qualcomm Hexagon NPU (`HTP0`) compute engine via `libgeniex_plugin_llama_cpp.so` and QNN FastRPC drivers (`ADSP_LIBRARY_PATH`), bypassing Adreno 830 OpenCL flash attention matrix dimension mismatches. Retains seamless CPU fallback.
+- `brainuke_extension/settings.gradle.kts`: Added JitPack repository (`https://jitpack.io`).
+- `brainuke_extension/app/build.gradle.kts`: Raised `minSdk` to 27; added `com.qualcomm.qti:geniex-android:0.3.16` dependency.
+- On-Device Benchmark Verification (Samsung Galaxy S25+, Snapdragon 8 Elite / SM8750): Achieved 75.64 tok/s prefill speed and 24.02 tok/s decoding speed natively on Hexagon NPU (`HTP0`) with strict thought channel isolation intact.
+- `brainuke_core/cognition/runner_manager.py`: Implemented `PCRunnerManager` providing straightforward switching between Normal (Supervisor 26B) and Secret (Uncensored Heretic 26B), disk path resolution with fallback verification, live runner health status polling on port 8081, load initiation, `start_llama_server.bat` launch command generation, and inference settings persistence in `config/models.json`.
+- `brainuke_throne/server/main.py`: Added authenticated PC model management REST endpoints (`GET /api/v1/models/status`, `POST /api/v1/models/select`, `POST /api/v1/models/load`, `POST /api/v1/models/settings`).
+- `brainuke_throne/ui_desktop/cecilia_ui.py`: Added top header model switcher button (`🟢 Normal (26B)` vs `🟣 Secret (Heretic)`), live load status badge (`Model: Loaded 🟢` vs `Model: Offline 🔴`), quick load initiator button (`▶ Load` / `🔄 Reload`), Cognitive Nexus model HUD, and interactive `⚙ Model & Config` modal dialog with live temperature/min-p sliders, context window selector, GPU layers offload, and KV cache quant options.
+- `tests/test_model_manager.py`: Added unit test coverage for model selection, offline/online status checks, inference settings persistence, launch command formatting, and load initiation.
+- `config/models.json`: Added `storage_options` for Android runner with selectable targets: Ghz S25+ primary internal (`/storage/emulated/0/SerenityDroid/E2B`), Download directory (`/storage/emulated/0/Download/models`), and app sandbox (`/sdcard/Android/data/com.brainuke.serenitydroid/files/models`). Registered model endpoints for `gemma-4-E2B-it-qat-UD-Q2_K_XL.gguf`, `Huihui-gemma-4-E2B-it-qat-q4_0-unquantized-abliterated-Q4_K.gguf`, `gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf`, and multimodal projector `mmproj-F16.gguf`.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/MainActivity.kt`: Added `📁 Models` toolbar button and interactive storage path selection dialog with live `.gguf` file discovery, path persistence via `SharedPreferences`, and custom directory input support.
+- `brainuke_throne/ui_desktop/fonts/ModernAntiqua-Regular.ttf`: Installed project font "Modern Antiqua" from user directory `C:\Users\ccrg6\Desktop\Hub\Fonts\Modern_Antiqua`.
+- `brainuke_throne/ui_desktop/cecilia_ui.py`: Added Windows dynamic GDI font registration via `ctypes.windll.gdi32.AddFontResourceExW` loading "Modern Antiqua" into process memory; applied typography across all Tkinter UI elements, status badges, buttons, and reasoning panels.
+- `brainuke_throne/ui_desktop/style.css`: Configured `@font-face` and CSS font variables for "Modern Antiqua".
+- `brainuke_core/cognition/llama_client.py`: Added `reset_slot(slot_id=0)` (`POST /slots/{slot_id}?action=erase`) and token slot polling (`get_slot_tokens()`) to safely purge KV cache while preserving context window buffer limit (32,768).
+- `brainuke_core/cognition/runner_manager.py`: Added `reset_model_slot` endpoint handler and slot reset command formatting.
+- `brainuke_core/cognition/orchestrator.py`: Implemented `/reset` conversational command parsing and autonomous thought parameter directive extraction (`[PARAM: temp=X, min_p=Y, ctx=Z]`) allowing Cecilia to self-tune inference settings during cognition.
+- `brainuke_throne/server/main.py`: Added `POST /api/v1/models/reset` route, and self-healing REST API (`GET /api/v1/self_heal/status`, `POST /api/v1/self_heal/settings`, `POST /api/v1/self_heal/diagnose`, `POST /api/v1/self_heal/apply`, `GET /api/v1/self_heal/patch/{error_id}`).
+- `brainuke_throne/ui_desktop/cecilia_ui.py`: Added `🔄 Reset Slot` control in top bar and model modal; added `🩺 Self-Heal / Debug` modal dialog with live error diagnostic feed, toggleable auto-heal/human confirmation controls, staged code patch inspection diff viewer, and manual debug trigger.
+- `brainuke_core/cognition/error_sentry.py`: Implemented `ErrorSentry` and `ErrorDiagnostic` buffering unhandled runtime failures and manual UI debug triggers across subsystems.
+- `brainuke_core/cognition/self_healing_ide.py`: Implemented `SelfHealingIDE` recursive error correction engine with inference green-light verification gate, sandboxed diagnostic workspace (`read_code_file`, `search_workspace`, `test_syntax_sandbox`), autonomous recursive retry loop, and safe patch staging with backup (.bak) generation.
+- `config/self_healing.json`: Created persistent self-healing settings file (`auto_heal_enabled`, `require_human_confirmation`, `max_healing_attempts`, `auto_restart_on_patch`).
+- `tests/test_self_healing.py`: Added comprehensive unit tests for `ErrorSentry` and `SelfHealingIDE` covering diagnostic recording, green-light gating, sandbox syntax testing, patch staging, and file modification with backup.
+- `brainuke_extension/app/src/main/jniLibs/arm64-v8a/`: Integrated native C++ JNI binaries (`libserenity_llama.so`, `libggml.so`, `libomp.so`, `libQnn*.so`, `libgeniex*.so`, `liblitert*.so`) bundled from reference project `SerenityDroid`.
+- `brainuke_extension/app/src/main/java/com/example/serenitydroid/jni/LlamaAndroid.kt`: Added JNI binding object interfacing with `libserenity_llama.so` (`loadModel`, `unloadModel`, `isModelLoaded`, `completion_init`, `completion_loop`, `getBackendName`).
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/inference/LocalInferenceEngine.kt`:
+  - Connected `LlamaAndroid` native model loader (`loadModel`) and completion loop (`completion_init` / `completion_loop`) directly to local reflex runner.
+  - Configured hardware acceleration hint fallback sequence (`HTP` Snapdragon NPU -> `OpenCL` Adreno GPU -> `CPU`).
+  - Added multi-directory device storage scanner (`E2B`, `SerenityDroid`, `Download/models`, `Download`, `Documents`) with SAF/Content URI stream copying into `/storage/emulated/0/SerenityDroid/E2B/`.
+  - Added strict model filename match verification preventing silent fallback to default models when custom core files are selected.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/MainActivity.kt`:
+  - Configured `ADSP_LIBRARY_PATH` environment variable via `Os.setenv` for Qualcomm Hexagon FastRPC and NPU DSP driver discovery.
+  - Added Android 11+ `MANAGE_EXTERNAL_STORAGE` ("All Files Access") permission prompt logic and direct toolbar shortcut.
+  - Reorganized **Model Control & Inference Dashboard** UI into a clean 4-button, 2-column grid (`Auto-Detect`, `Storage Path`, `Normal GGUF`, `Secret GGUF`) with GGUF file wizards and system document picker support.
+  - Fixed state persistence so manual GGUF file selections (`normalModelFile` and `secretModelFile`) stick across model loads and app restarts.
+- `brainuke_extension/app/src/main/AndroidManifest.xml`: Added `READ_EXTERNAL_STORAGE` and `MANAGE_EXTERNAL_STORAGE` permissions for external folder model scanning.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/model/BrainukeModels.kt`: Added `ModelType` (`NORMAL` vs `SECRET`), `ModelLoadState` (`Unloaded`, `Loading`, `Loaded`, `Error`), and `InferenceConfig` (temperature, topP, maxTokens, CPU threads, context window, strict thought isolation, custom system prompt).
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/inference/LocalInferenceEngine.kt`: Integrated `loadState` Flow, load initiation (`loadModel`), memory unloading (`unloadModel`), and inference settings update (`updateConfig`); implemented dynamic persona switching between Normal (Public Companion) and Secret (Level 7 Fallen Angel) personas.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/service/SensoryService.kt`: Exposed `getModelLoadState()`, `getInferenceConfig()`, `updateInferenceConfig()`, `loadModel()`, and `unloadModel()` to bound clients.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/MainActivity.kt`: Added live header status badge chip (`modelStatusChip`) indicating real-time model loaded/unloaded state (`🟢 Normal: Loaded`, `🔮 Secret: Loaded`, `🔴 Model Unloaded`, `⏳ Loading...`) and interactive **Model Control & Inference Dashboard** modal allowing one-touch switching between Normal and Secret models, load/unload initiation, temperature/top-P/max-tokens adjustment, CPU threads selector, and custom system prompt editing.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/util/MessageBoardCrypto.kt`: Implemented AES-256-GCM authenticated encryption and decryption for offline messageboard packets (`.bmb`) with PBKDF2 SHA-256 key derivation.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/data/SyncRepository.kt`: Added `exportEncryptedMessageBoardPacket()` and `importEncryptedMessageBoardPacket()` allowing dialogue turns and telemetry to be exported into encrypted packets and upgraded packet files from PC Cecilia/peers to be merged back into local SQLite Room database.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/MainActivity.kt`: Added `🔐 Packet Exchange` toolbar button and modal dialog for exporting encrypted `.bmb` packets to clipboard/file and pasting/importing upgraded response packets.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/inference/LocalInferenceEngine.kt`: Embedded Cecilia's authentic Fallen Angel persona system prompt (`CECILIA_SYSTEM_PROMPT`) from `SerenityPC` (`serenity_resources.py`); implemented dynamic instruction fulfillment for repetition commands ("say X"), transition markers ("until then..."), flattery deflections, status/telemetry queries, time lookups, and questions on local offline reflex mode.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/util/ThoughtIsolator.kt`: Implemented regex pattern isolation scrubbing `<thought>`, `<think>`, and `<reasoning>` XML tags from speech output into expandable reasoning accordion drawers (`activeModelThoughtView`) with 100% zero-leakage guarantee.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/MainActivity.kt`: Added `enableEdgeToEdge()` and `WindowInsetsCompat` listener dynamically padding root layout against status bar notch and system navigation bar buttons (`||| O <`).
+- `brainuke_extension/app/src/main/res/values/strings.xml`: Created application string resources declaring `app_name` as `"Project Brainuke"`.
+- `brainuke_extension/app/src/main/AndroidManifest.xml`: Updated app label to `@string/app_name`, applied `Theme.Material.NoActionBar` theme, and declared `<uses-feature android:name="android.hardware.camera" android:required="false" />`.
+- `brainuke_extension/settings.gradle.kts`: Updated root project name to `"Project Brainuke"`.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/MainActivity.kt`: Updated app branding, logcat `TAG` to `"ProjectBrainuke"`, and built full-screen dark-mode live status & sensory pipeline log UI; configured `defaultThroneHost = "127.0.0.1"` for USB reverse tethering and set active machine token from `KeyVault`.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/network/ThroneClient.kt`: Updated `User-Agent` to `"ProjectBrainuke/1.0"`, fixed `var line: String? = null` initialization, and updated KDoc.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/service/SensoryService.kt`: Updated foreground notification title to `"Project Brainuke Active"` and upgraded CameraX resolution configuration to `ResolutionSelector`.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/model/BrainukeModels.kt`: Declared `abstract val timestamp: Long` on `BrainukeEvent` sealed class interface.
+- Build & Toolchain Modernization:
+  - Upgraded Android SDK `compileSdk` / `targetSdk` to `35`, `kotlinx-coroutines-android` to `1.10.1`, `androidx.core:core-ktx` to `1.15.0`, `androidx.activity:activity-ktx` to `1.10.0`, `androidx.lifecycle` to `2.8.7`, and CameraX to `1.4.1`.
+- `serenity_resources.py`: Exported `CECILIA_CORE_PROMPT` constant encapsulating the Level 7 Fallen Angel persona system prompt.
+- `brainuke_core/cognition/orchestrator.py`: Linked `CECILIA_CORE_PROMPT` into Cognitive Orchestrator speech synthesis engine (`[SYSTEM DIRECTIVE: CECILIA PERSONA ENGINE]`) with fallback import.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/inference/LocalInferenceEngine.kt`: Mirrored `CECILIA_CORE_PROMPT` verbatim and bound `CECILIA_SECRET_SYSTEM_PROMPT` directly to it.
+
+### Fixed
+- `brainuke_extension/app/src/main/AndroidManifest.xml`: Declared `<uses-native-library android:name="libOpenCL.so" android:required="false" />` along with `-car` and `-pixel` variants to permit `dlopen` access to vendor OpenCL drivers across Android 12+ namespace barriers.
+- `brainuke_extension/app/build.gradle.kts`: Configured `packaging { jniLibs { useLegacyPackaging = true } }` ensuring uncompressed extraction of native `.so` binaries from APK to app native library directory.
+- `brainuke_extension/app/src/main/jniLibs/arm64-v8a/libc++_shared.so`: Added missing C++ shared runtime library required for dynamic linking by `libserenity_llama.so`.
+- `brainuke_extension/app/src/main/java/com/example/serenitydroid/jni/LlamaAndroid.kt`: Explicitly pre-loaded runtime dependencies (`c++_shared` and `omp`) before loading `serenity_llama`; exposed `isLibraryLoaded` state check.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/inference/LocalInferenceEngine.kt`:
+  - Verified `LlamaAndroid.isLibraryLoaded` and native loader return codes before setting `ModelLoadState.Loaded`.
+  - Updated `backendHint = "OpenCL"` in native model loader preventing fallback to CPU mode tracking in `libserenity_llama.so`.
+  - Refined token stopping and scrubbing logic with separate `endPattern` (breaks generation on true EOG/EOS) and `controlPattern` (strips `</?start_of_turn>`, `</?end_of_turn>`, and special tags without breaking stream).
+  - Cleaned thought isolation logic in `ThoughtIsolator.isolate` to avoid echoing speech output into reasoning drawers when no `<thought>` tags are emitted.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/inference/LocalInferenceEngine.kt`:
+  - Upgraded prompt formatting to official Gemma 4 chat templating (`<bos><|turn>system\n<|think|>\n...<turn|>\n<|turn>user\n...<turn|>\n<|turn>model\n`), replacing incompatible Gemma 2 `<start_of_turn>` tokens that caused immediate EOG token emission on token 0.
+  - Added `<turn|>` and `<|turn>` to `endPattern` and control sequence sanitization.
+  - Added empty piece tolerance (up to 3 consecutive empty chunks) in completion loop preventing premature exit on special token consumption.
+  - Bound native thought fallback to `LlamaAndroid.getBackendName()`.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/util/ThoughtIsolator.kt`:
+  - Added support for Gemma 4 native thinking channels (`<|channel>thought...<channel|>`) and `<|think|>` blocks in `thoughtBlockRegex`, `orphanStartTagRegex`, and `rawTagRegex`.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/MainActivity.kt`:
+  - Fixed horizontal action bar button overlap and text clipping with 16px right margins, padding, and rounded pill gradient drawables.
+  - Added direct `updateModelStatusChip(newState)` callbacks during model selection and inference configuration updates so `modelStatusChip` immediately synchronizes to `🔮 Secret: Loaded` or `🟢 Normal: Loaded`.
+
+### Security
+- `brainuke_extension/app/src/main/res/xml/network_security_config.xml`: Hardened network security config by disabling global cleartext traffic, removing user certificate trust anchors, restricting cleartext HTTP strictly to loopback development interfaces (`10.0.2.2`, `127.0.0.1`, `localhost`), and enforcing custom Root CA pinning (`@raw/rootca`).
+
+## [Unreleased] - 2026-09-25
+
+### Added
+- `brainuke_throne/ui_desktop/cecilia_ui.py`: Implemented Desktop Native Cecilia-UI application in pure Python/Tkinter (standard library Rung 2) with custom Obsidian/Emerald theme (`#070B14`, `#34D399`, `#6EE7B7`), live VAD affect gauges, real-time background SSE downlink listener, messageboard thread viewer, and strictly isolated reasoning drawers preventing thought leakage into spoken text.
+- `start_ui.ps1` & `start_ui.bat`: Added one-click launch scripts for the Desktop Native Cecilia-UI client.
+
+### Security
+- `brainuke_throne/server/main.py`: Locked down inner database and cognitive API from unauthenticated localhost/browser access:
+  - Removed open public `/ui` static directory mount.
+  - Implemented `verify_machine_token(request)` hardware-bound token validation across all database routes (`/api/v1/messageboard/*`, `/api/v1/subagents/*`, `/subscriptions/listen`, `/api/v1/cognitive/*`, `/api/v1/sync/*`, `/api/v1/sensory/*`).
+  - Added direct browser navigation block on root `/` returning HTTP 401 Unauthorized when requested via web browser.
+- `tests/test_integration.py`: Added explicit test cases verifying raw browser localhost navigation rejection (401), unauthenticated database access rejection (401), and authenticated inner database access verification.
+- `brainuke_core/cognition/subagent_dispatcher.py`: Implemented `SubagentDispatcher` and `ModelRouter` supporting autonomous background subagent task spawning (`analytical_scout`, `affective_explorer`, `edge_reflex`), dynamic model selection across `supervisor`, `heretic`, and `edge_reflex` profiles, and automated insight ingestion into `MemoryVault`.
+- `brainuke_throne/server/main.py`: Added `POST /api/v1/subagents/dispatch`, `GET /api/v1/subagents/tasks`, and `GET /api/v1/subagents/models` endpoints.
+- `brainuke_throne/ui_desktop/index.html` & `app.js`: Added live autonomous subagent task tracking telemetry to the Cognitive Nexus HUD.
+- `tests/test_phase3_phase4.py`: Added unit test coverage for `ModelRouter` policy, subagent background task lifecycle, and DMN insight archival.
+- `brainuke_core/memory/vault.py`: Added concept family taxonomy methods (`get_concept_family_summary()`, `suggest_concept_family()`), post simmer tracking (`get_unsimmered_admitted_posts()`, `mark_posts_simmered()`), and database migration for `simmered` flag on `messageboard_posts`.
+- `brainuke_core/cognition/simmer_bus.py`: Integrated admitted messageboard posts into DMN reflection cycles while strictly quarantining unverified posts; automated recurring execution of memory decay retention curves (`apply_memory_decay()`).
+- `brainuke_throne/server/main.py`: Added `GET /api/v1/messageboard/concepts` endpoint and auto-taxonomy tagging on thread creation.
+- `brainuke_throne/ui_desktop/app.js` & `index.html` & `style.css`: Implemented interactive social layer modal viewer, live thread listing, thread creation, reply submissions, and real-time quarantine flag HUD updates.
+- `tests/test_phase3_phase4.py`: Added unit tests for concept family taxonomy, post simmer absorption, and automated memory decay.
+- `brainuke_core/affect/engine.py`: Added dynamic affect evolution (`evolve_baseline()`) blending weighted recent turns (70%) with random historical turns (30%) under safe identity bounds. Added time grounding (`apply_time_grounding()`) with accelerated recovery kinetics for negative valence and heightened arousal over real time.
+- `brainuke_core/memory/vault.py`: Added `get_recent_interactions()` and `get_random_interactions()` to sample conversation history for baseline mood calibration.
+- `tests/test_phase3_phase4.py`: Added unit test coverage for dynamic affect evolution, guardrail blocking, and time grounding recovery.
+
+### Changed / Fixed
+- `brainuke_core/cognition/orchestrator.py`: Integrated dynamic affect evolution and conversation history recording into `process_interaction()`; hooked intent guardrail to block persona baseline weight alteration during hostile/adversarial turns.
+
+- `brainuke_core/cognition/orchestrator.py`: Implemented approved Plan C (Hybrid Affect-Weighted Grounding) dynamically partitioning DMN concept nodes: high-dominance worldview anchors (`dominance >= 0.6`) inject into Cecilia's authentic persona prompt under `[GROUNDED WORLDVIEW & HIGH-DOMINANCE ANCHORS]`, while lower-dominance technical concepts route to shadow reasoning in `<thought>`.
+- `brainuke_core/memory/vault.py`: Added `concept_family`, `importance_weight`, and `dominance_weight` columns to `distilled_insights` with automated table migration. Added `get_recent_grounding()` for worldview anchor retrieval.
+- `brainuke_core/cognition/simmer_bus.py`: Wired `DeepCook` with `LlamaServerClient` and categorized DMN insights into concept families (`tactical_analysis`, `ambient_sensory`), broadcasting `[DMN Insight] [{concept_family}]` strictly over SSE thought downlink.
+- `brainuke_throne/server/main.py`: Added `GET /api/v1/cognitive/status` exposing Throne inference telemetry, runner health, active affect vector, grounding count, and offload recommendations.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/network/ThroneClient.kt`: Added `checkCognitiveStatus()` measuring round-trip inference latency and model availability.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/service/SensoryService.kt`: Added `InferenceMode` (`THRONE_OFFLOAD` vs `LOCAL_REFLEX`) and `evaluateInferenceOffload()` latency evaluation (<250ms threshold).
+- `tests/test_protocol.py`: Added unit test coverage for `MemoryVault` concept grounding and `CognitiveOrchestrator` Plan C hybrid prompt separation.
+- `tests/test_integration.py`: Added Stage 10 validating `GET /api/v1/cognitive/status` and Plan C grounding end-to-end.
+- `brainuke_core/protocol/schema.py` & `brainuke_core/protocol/__init__.py`: Unified Intelligence Exchange Protocol schema (`PacketType`, `ExchangeMode`, `DeviceType`, `DeviceSender`, `ProtocolEnvelope`, `SessionHandoffPayload`) with strict thought isolation enforcement.
+- `brainuke_core/session/state.py` & `brainuke_core/session/__init__.py`: State Management & Zero-Amnesia `SessionManager` maintaining sliding dialogue window, active device focus, and cross-platform context handoff.
+- `tests/test_protocol.py`: Dedicated unit test suite verifying envelope serialization, thought isolation flags, and session handoffs.
+- `brainuke_throne/server/main.py`:
+  - Added `POST /api/v1/pairing/handshake` for zero-touch mutual discovery and ephemeral token issuance.
+  - Added `POST /api/v1/session/handoff` transferring conversational focus and affect vectors between PC and Android, broadcasting over SSE Downlink.
+  - Added `GET /api/v1/session/active` enabling instant session hydration and context continuity.
+  - Updated `POST /api/v1/sync/push` to batch-ingest mobile dialogue turns into `SessionManager` and `MemoryVault`.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/model/BrainukeModels.kt`: Added `BrainukeEvent.Handoff`, `ConversationTurnPayload`, `SessionHandoffData`.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/data/Entities.kt`: Added `ConversationEntity` table.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/data/Daos.kt`: Added `ConversationDao` with unsynced query and observation flows.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/data/BrainukeDatabase.kt`: Bumped database version to 2 with `ConversationEntity`.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/network/ThroneClient.kt`: Added `pairWithThrone`, `requestHandoff`, `fetchActiveSession`.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/data/SyncRepository.kt`: Added `queueConversationTurn`, `syncActiveSession`, and conversation batch push.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/MainActivity.kt`: Added SSE `Handoff` observation, dynamic active session auto-hydration, and conversation count telemetry logs.
+- `tests/test_integration.py`: Added Stage 8 (Zero-Touch Pairing Handshake) and Stage 9 (Session Handoff & Zero-Amnesia Dialogue Continuity).
+- `brainuke_core/cognition/llama_client.py`: PC runner client (`LlamaServerClient`) communicating with `llama-server` on port 8081 via `/completion` and SSE streaming with offline test fallback.
+- `brainuke_throne/server/main.py`: Added `POST /api/v1/cognitive/interact` endpoint orchestrating reasoning streams, speech synthesis, affect state feedback, and memory logging.
+- `tests/test_integration.py`: Added Stage 7 validating `/api/v1/cognitive/interact` end-to-end.
+
+### Changed / Fixed
+- `brainuke_core/cognition/orchestrator.py`: Implemented approved Plan A dual-split architecture (`reasoning_llm` for shadow analytical deconstruction, `persona_llm` for Cecilia's unfiltered, razor-sharp voice); updated prompts with Gemma chat templating and isolated `<thought>` tokens.
+- `brainuke_core/cognition/thought_isolation.py`: Expanded leak patterns to scrub `<thought>`, Gemma `<start_of_turn>`/`<end_of_turn>`, and system markers from speech output.
+- `brainuke_core/affect/engine.py`: Refined `_generate_tone_descriptor()` to replace bland/subservient descriptors with Cecilia's sharp wit ("Commanding, Razor-Sharp Wit, Unfiltered", "Cutting, Sardonic, Unsparing", "Calm, Smirking, Intellectually Detached", "Guarded, Terse, Withdrawn"). Added `from_config_file()` classmethod to dynamically parse baseline temperament (V:0.2, A:0.0, D:0.8) and Ornstein-Uhlenbeck parameters from `config/brainuke_config.json`.
+- `config/models.json`: Updated `pc_runner.port` from 8080 to 8081 to avoid port collision with Discovery HTTP server.
+- `brainuke_throne/server/main.py`: Initialized `BrainukeCore` dynamically from `config/brainuke_config.json` instead of hardcoded dictionary.
+- `brainuke_core/cognition/__init__.py`: Exported `LlamaServerClient`.
+
+## [0.2.0] - 2026-09-24
+
+### Fixed
+- `brainuke_throne/server/main.py`:
+  - Added dynamic `sys.path` bootstrap so running `python brainuke_throne/server/main.py` directly resolves `brainuke_core` without `ModuleNotFoundError`.
+  - Integrated FastAPI `BackgroundTasks` in `/api/v1/sensory/stream` to ingest high-rate Base64 telemetry and audio without blocking the server event loop.
+  - Automated Windows Defender Firewall provisioning on startup via `TLSProvisioner.ensure_firewall_rules()`.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/network/ThroneClient.kt`:
+  - Added OkHttp `ConnectionPool` (8 idle connections, 2-minute keepalive) to reuse TLS/TCP sessions and eliminate connection handshake latency under streaming.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/service/SensoryService.kt`:
+  - Adjusted audio frame buffer from 100ms to 250ms (4000 samples @ 16kHz) to reduce HTTP POST dispatch rate by 60%, preventing dispatcher queue congestion.
+- `brainuke_throne/tls/provisioner.py`:
+  - Added RFC 5280 `SubjectKeyIdentifier` and `AuthorityKeyIdentifier` extensions to Root CA and Leaf certificates, resolving `Missing Authority Key Identifier` SSL verification failures in OpenSSL 3.x / Android.
+  - Added `ensure_firewall_rules()` to provision inbound TCP 8080 and 8443 rules via `netsh`.
+- `brainuke_core/cognition/thought_channel.py`: Fixed syntax typo `self.is_active = FalseS` to `self.is_active = False`.
+- `brainuke_core/cognition/deep_cook.py`: Imported missing `Any` from `typing`.
+- `brainuke_core/cognition/__init__.py`: Exported cognition classes (`CognitiveOrchestrator`, `OrchestrationResult`, `ThoughtIsolation`, `ThoughtChannel`, `DeepCook`).
+- `brainuke_core/affect/state.py`: Added missing `@dataclass` import from `dataclasses`.
+- `brainuke_core/affect/engine.py`:
+  - Added missing imports: `math`, `random`, `time`, `typing.Dict`, `typing.Optional`, and `AffectState`, `BrainukeParameters`.
+  - Fixed `KeyError: 'valenc'` in `update_state` by removing invalid `rstrip('e')` string stripping and properly normalizing baseline mu keys (`valence`/`v`, `arousal`/`a`, `dominance`/`d`).
+  - Added attribute alias mapping for interaction impulses (`v`, `a`, `d` -> `valence`, `arousal`, `dominance`).
+- `brainuke_core.py`: Converted from redundant class redeclaration with missing `BrainukeCore` into clean entrypoint importing from `brainuke_core` package.
+- `config/brainuke_config.json`: Replaced raw Python code with valid JSON structure for baseline temperament, OU process parameters, sampling, and network ports.
+- `config/models.json`: Populated with extracted PC `llama-server` runner parameters (`gemma-4-26B-A4B`, uncensored `heretic-v2`), configured KV cache flags (`--cache-type-k q8_0`, `--cache-type-v q5_1`, `-sm none`, `-fa on`), and Android SerenityDroid native runner configurations (`libserenity_llama.so`, `gemma-4-E2B` mobile targets).
+
+### Added
+- `brainuke_extension/settings.gradle.kts`: Gradle root settings defining project repositories and `:app` module for Android Studio.
+- `brainuke_extension/build.gradle.kts`: Root Gradle build configuration with Android application and Kotlin plugins.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/MainActivity.kt`: Entrypoint activity managing runtime audio/camera permissions, service binding, and live Downlink event observation.
+- `brainuke_extension/app/src/main/res/xml/network_security_config.xml`: Network security config enabling user, system, and bundled raw trust anchors (`@raw/rootca`), plus cleartext HTTP for port 8080 discovery.
+- `brainuke_extension/app/src/main/res/raw/rootca.crt`: Bundled copy of `rootCA.pem` in Android raw resources for zero-touch credential trust.
+- `start_throne.bat` & `start_throne.ps1`: One-click Throne server startup scripts orchestrating TLS provisioning, firewall checks, port 8080 discovery, DMN simmer bus, and port 8443 FastAPI HTTPS.
+- `scripts/setup_firewall.ps1`: Automated PowerShell script to add Windows Defender Firewall inbound rules for ports 8443 and 8080.
+- `tests/test_integration.py`: Automated end-to-end integration test suite verifying Discovery Server (Port 8080), HTTPS custom Root CA pinning (Port 8443), Bearer token authentication, Uplink sensory telemetry/audio/vision POST endpoints, and Downlink SSE thought stream isolation.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/model/BrainukeModels.kt`: Data models for Downlink events (`BrainukeEvent.Thought`, `BrainukeEvent.Speech`, `BrainukeEvent.Heartbeat`) and Uplink payloads (`TelemetryPayload`, `AudioChunkPayload`, `VisionPayload`).
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/network/ThroneClient.kt`: Network manager with custom `X509TrustManager` pinned to manual `rootCA.pem`, Bearer token interceptor, Coroutine/Flow SSE Downlink consumer, and suspend Uplink callers.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/service/SensoryService.kt`: Foreground service managing 30-second periodic telemetry, AudioRecord PCM stream with energy-based local VAD, CameraX low-res JPEG frame capture, and downlink event dispatching.
+- `brainuke_extension/app/src/main/AndroidManifest.xml`: Android application manifest with permissions, foreground service declaration, and network security config link.
+- `brainuke_extension/app/build.gradle.kts`: Gradle build configuration for Kotlin, Coroutines, OkHttp, and CameraX.
+- Package initialization files (`__init__.py`) across `brainuke_core`, `brainuke_core/affect`, `brainuke_core/cognition`, `brainuke_core/memory`, `brainuke_core/security`, `brainuke_core/tools`, `brainuke_throne`, `brainuke_throne/server`, `brainuke_throne/tls`.
+- `requirements.txt`: Documented project runtime dependencies (`cryptography`, `fastapi`, `uvicorn`).
+- `TODO.txt`: Workspace tracking for Sprint 3 approval and pending integration checks.
+- `brainuke_core/memory/vault.py`: High-durability SQLite `MemoryVault` database engine maintaining `sensory_pool`, `interaction_history`, and `distilled_insights` tables.
+- `brainuke_core/cognition/simmer_bus.py`: Default Mode Network (DMN) `SimmerBus` idle monitoring engine implementing Plan A ("Shared Simmer Bus") with automatic consolidation and `[DMN Insight]` broadcasting over SSE `thought` channel.
+- `brainuke_throne/server/main.py`: Added DataSync endpoints `POST /api/v1/sync/push`, `GET /api/v1/sync/pull`, and `POST /api/v1/sync/simmer`, integrated with `MemoryVault` and `SimmerBus`.
+- `brainuke_extension/build.gradle.kts` & `brainuke_extension/app/build.gradle.kts`: Integrated Google KSP plugin and Android Room 2.6.1 (`room-runtime`, `room-ktx`, `room-compiler`).
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/data/`:
+  - `Entities.kt`: Room entities `TelemetryEntity` and `MemoryNodeEntity`.
+  - `Daos.kt`: `TelemetryDao` and `MemoryNodeDao` with batch sync helpers.
+  - `BrainukeDatabase.kt`: RoomDatabase singleton instance.
+  - `SyncRepository.kt`: Repository managing non-blocking local queueing and bidirectional sync push/pull.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/network/ThroneClient.kt`: Added `pushSyncBatch` and `pullSyncDelta` network callers.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/MainActivity.kt`: Added "⚡ Sync with Throne" button, connection auto-sync, and live sync status logs.
+- `tests/test_integration.py`: Added stage 6 verifying DataSync push queueing, DMN Simmer consolidation, `[DMN Insight]` SSE thought streaming, and delta pack pull.

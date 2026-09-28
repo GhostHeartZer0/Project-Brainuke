@@ -1,0 +1,8 @@
+{
+  "auto_heal_enabled": false,
+  "require_human_confirmation": true,
+  "max_healing_attempts": 3,
+  "auto_restart_on_patch": true,
+  "target_model": "gemma-4-26B-A4B-it-qat-UD-Q4_K_XL",
+  "sandbox_dir": "brainuke_throne/sandbox/self_healing"
+}

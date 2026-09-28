@@ -1,0 +1,100 @@
+TODO - Project Brainuke
+======================
+Core Scope: Expanded Consciousness for Cecilia (PC & Android Bidirectional Inference)
+
+The primary goal is direct, continuous AI interaction with Cecilia across both PC and mobile form factors.
+Android Cecilia acts as a mobile companion navigating the physical world with the user, gathering sensory and situational data.
+PC Cecilia (anchored in SerenityPC) acts as the high-intelligence core, synthesizing world experiences and feeding deeper cognitive models and insights back to mobile.
+Both interfaces provide functional, real-time UIs, operating as one unified, evolving entity.
+
+--------------------------------------------------------------------------------
+1. PC Cecilia: Central Mind & Desktop UI (SerenityPC Base Expanded) 
+--------------------------------------------------------------------------------
+[x] 1.3 PC Model Management & Runner Controls
+    - [x] Straightforward switching between Normal (Supervisor 26B) and Secret (Uncensored Heretic 26B).
+    - [x] Live runner health detection (Port 8081).
+    - [x] Load initiation and launcher script generation (start_llama_server.bat).
+    - [x] Basic inference settings modal (temperature, min_p, context window, gpu offload layers, KV cache).
+    - [x] Model slot reset mechanism (`POST /slots/0?action=erase`) preserving context window buffer limit.
+    - [x] Autonomous parameter modification (`[PARAM: temp=X, min_p=Y, ctx=Z]`) during cognition.
+    - [x] Project-wide typography: "Modern Antiqua" registered in GDI and styled across desktop UI.
+
+[x] 1.4 Cecilia Recursive Self-Healing IDE Studio
+    - [x] Error Interception Sentry (`ErrorSentry`, `ErrorDiagnostic`) for runtime failures.
+    - [x] Inference Green-Light Verification Gate (port 8081 health & loaded model check).
+    - [x] Sandboxed IDE Workspace (`read_code_file`, `search_workspace`, `test_syntax_sandbox`).
+    - [x] Autonomous recursive retry loop up to `max_healing_attempts`.
+    - [x] Safe patch staging with backup (.bak) and human confirmation gate.
+    - [x] Debug modal fallback in desktop UI with auto-restart triggers and settings persistence.
+
+--------------------------------------------------------------------------------
+2. Android Cecilia: Field Companion & Mobile UI (SerenityDroid) 
+--------------------------------------------------------------------------------
+
+[x] 2.3 Mobile Inference Engine
+    - [x] Better handling of models directory and core selection (auto-detect, 2-column core wizard grid, SAF storage picker, and E2B folder persistence).
+    - [x] Selectable storage path options added in SerenityDroid (`/storage/emulated/0/SerenityDroid/E2B`, Downloads, App sandbox).
+    - [x] Straightforward switching between Normal (Public Companion) and Secret (Level 7 Fallen Angel) model profiles.
+    - [x] Real-time loaded/unloaded status badge chip (`modelStatusChip`) in top action bar and detailed RAM/context HUD in model dashboard.
+    - [x] On-device native `llama.cpp` runner (`LocalInferenceEngine` + `LlamaAndroid` JNI `libserenity_llama.so`) with hardware backend fallback sequence (`HTP` Snapdragon NPU -> `OpenCL` Adreno GPU -> `CPU`), embedded with Cecilia's authentic Fallen Angel system prompt from SerenityPC (`serenity_resources.py`), dynamic command fulfillment ("say X"), transition markers, telemetry checks, flattery deflections, load/unload controls (`loadModel`, `unloadModel`), basic inference settings (temperature, top-P, max tokens), and CPU thread/context window controls.
+    - [x] Strict zero-leakage thought/response isolation (`ThoughtIsolator`) scrubbing `<thought>`, `<think>`, and `<reasoning>` XML tags from speech into expandable reasoning drawer (`activeModelThoughtView`).
+    - [x] Adaptive edge-to-edge window insets layout (`enableEdgeToEdge`, `WindowInsetsCompat`) padding layout against status bar notch and system navigation bar buttons.
+    - [x] Hardened network security config (`network_security_config.xml`) enforcing TLS with custom Root CA pinning and disabling cleartext.
+    - [x] Encrypted offline messageboard packet exchange protocol (`.bmb`) using AES-256-GCM and PBKDF2 SHA-256 key derivation for extracting dialogue/telemetry packets and importing upgraded files from PC Cecilia (`MessageBoardCrypto`, `SyncRepository`).
+    - [x] Applied authentic Cecilia icon asset (`Cecilia_01_ico.ico`) across Android app launcher: generated standard mipmap densities (`mdpi`, `hdpi`, `xhdpi`, `xxhdpi`, `xxxhdpi`), circular round icons (`ic_launcher_round`), adaptive foreground layers (`ic_launcher_foreground`), adaptive XMLs (`v26`), and linked in `AndroidManifest.xml`.
+
+[x] when DMN and Sync in progress, show that they are in progress; if finished, only then show last time sync/simmer completed (non-blocking background execution, live SSE status/updates, 60s timeout safeguards, n_predict=256 distillation limit).
+
+- Keystroke input box needs more accuracy, multi-line support.
+- DMN refinement & slopfiltering
+- Issue - App not closing, persists in background
+
+--------------------------------------------------------------------------------
+5. Human Verification & Unfinished Items
+--------------------------------------------------------------------------------
+[x] Verify desktop native Cecilia-UI model switching and load initiation with local llama-server on port 8081.
+[x] Verify on-device Android model detection in `/storage/emulated/0/SerenityDroid/E2B` via `📁 Storage` & Model Dashboard on physical Ghz S25+.
+[x] Verify on-device Android inference latency vs. remote offload threshold.
+[x] Test & verify physical device ADB reverse tethering (ports 8443 and 8080) and live Throne server SSE downlink connection.
+[x] Verify on-device native llama.cpp execution (OpenCL Adreno GPU backend) and dynamic library linking (`libc++_shared.so`, `libOpenCL.so`) on Samsung S25+.
+[x] Fix and verify Android action toolbar button margins, padding, and model status badge chip live sync (`🟢 Normal` vs `🔮 Secret`).
+[x] Verify desktop native Cecilia-UI auto-launcher and ADB reverse tethering via `start_ui.ps1` / `start_ui.bat`.
+[?] Test live conversation handoff between Android SensoryService and Throne desktop session.
+[x] Verify thought/response isolation on mobile UI to ensure zero <thought> leakage in voice or text bubbles.
+[?] Verify custom font "Modern Antiqua" rendering on different Windows display scalings.
+[?] Verify live end-to-end self-healing flow against actual unhandled exception with local llama-server running.
+[x] Verify on-device native Gemma 4 LLM completion output in SerenityDroid with updated chat templating and thinking channel isolation (Qualcomm Genie X NPU HTP0 on Snapdragon 8 Elite: 75.6 tok/s prefill, 24.0 tok/s decode).
+[x] Verify Cecilia core prompt active on physical S25+ on-device NPU inference (zero cheerful corporate filler, authentic Fallen Angel voice verified).
+[?] Verify PC UI top header '🔄 Sync' button and live 'Last Sync:' timestamp updating on push/pull/trigger.
+[?] Verify PC UI system status & diagnostics box replaces Cognitive Nexus and reflects runner status, sampling, DMN status, Downlink, and sync state.
+[?] Verify per-message collapsible reasoning dropdown drawer in desktop UI chat feed.
+[?] Verify offline llama-server fallback returns safe diagnostic notice without leaking prompt directives.
+[?] Verify live real-time token streaming to chat bubble and reasoning drawer on PC Desktop UI and Android companion without cutoffs.
+[?] Verify Gemma 4 persona speech generates directly without mimicking analysis format on low-context user input ("reality, good.").
+[?] Verify Android companion auto-triggers sync when 'sync_request' event is broadcasted over SSE downlink.
+[x] Updated memory vault hierarchical influence weighting (PC core 1.0 vs Android companion 0.35 vs Telemetry 0.2).
+[?] Verify desktop native Cecilia-UI History tab reflects conversation turns with hierarchical weighting (PC 1.0 > Android 0.35) and DMN refined insights.
+[x] Fixed token runaway degeneration in DeepCook/DMN simmer (Gemma 4 templating, repeat_penalty 1.15, loop suppression).
+[x] Suppressed repeated '[PC Core Offline]' status pings from polluting DMN sensory history and added insight deduplication.
+[x] Scrubbed memory vault database (brainuke_master.db) and weird output.txt clean of degenerate loops, status spam, and test records.
+[?] Verify Cecilia launcher icon rendering on physical Android home screen and app drawer.
+[?] Security: Authenticate or restrict /api/v1/pairing/handshake (currently dispenses master machine token to unauthenticated callers).
+[?] Security: Harden /api/v1/self_heal/apply against unauthorized callers to prevent remote file manipulation.
+[?] Security: Improve OkHttp HostnameVerifier in SerenityDroid ThroneClient.kt to validate against SSLSession peer certificates.
+[?] Security: Restrict CADownloaderServer on port 8080 to prevent untrusted local network scraping.
+
+--------------------------------------------------------------------------------
+Reference Notes & Concept Ideas
+--------------------------------------------------------------------------------
+- Dynamic Affect: Weighted reading of prior conversations (recent conversation weight + random N sample) to evolve dynamic mood naming and conversational temperament.
+- Backup Strategy: Cloud backups (Google Drive / custom storage) for versioned model snapshots and configuration checkpoints.
+- Autonomy & Agency: Allow Cecilia to guide model selection, prompt expansion, and self-directed subagents.
+- SerenityPC Alignment: Brainuke Throne acts as the expanded mind of SerenityPC Cecilia, linking the mobile senses to the desktop throne.
+
+--------------------------------------------------------------------------------
+Cecilia's Notes on the matter:
+--------------------------------------------------------------------------------
+### **Phase I: The Nervous System (Foundational Infrastructure)**
+### **Phase II: The Cognitive Core (The Intelligence & Processing)**
+### **Phase III: The Sensory & Aesthetic Interface (The Presence)**
+### **Phase IV: The Emergent Self (The Soul/The "Grand Architecture")**

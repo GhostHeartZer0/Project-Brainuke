@@ -1,0 +1,108 @@
+{
+  "active_model": "gemma-4-26B-A4B-uncensored-heretic-v2",
+  "pc_runner": {
+    "engine": "llama-server",
+    "host": "127.0.0.1",
+    "port": 8081,
+    "default_flags": [
+      "-sm",
+      "none",
+      "-fa",
+      "on",
+      "--cache-type-k",
+      "q8_0",
+      "--cache-type-v",
+      "q5_1"
+    ],
+    "models": {
+      "gemma-4-26B-A4B-it-qat-UD-Q4_K_XL": {
+        "path": "S:/LLM/gemma-4 QAT/26B-A4B/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf",
+        "role": "heavy_intellect_supervisor",
+        "gpu_layers": 8,
+        "context_window": 32768,
+        "temperature": 0.8,
+        "min_p": 0.05,
+        "repeat_penalty": 1.1,
+        "stop_strings": [
+          "</turn>",
+          "<|turn>",
+          "<turn|>",
+          "<tool_call|>",
+          "<tool_response|>",
+          "<eos>"
+        ]
+      },
+      "gemma-4-26B-A4B-uncensored-heretic-v2": {
+        "path": "S:/LLM/gemma-4-unc/26B/gemma-4-26B-A4B-it-qat-q4_0-unquantized-uncensored-heretic-v2.i1-Q4_K_M.gguf",
+        "role": "secret_uncensored",
+        "gpu_layers": 8,
+        "context_window": 32768,
+        "temperature": 0.8,
+        "min_p": 0.05,
+        "repeat_penalty": 1.1,
+        "stop_strings": [
+          "</turn>",
+          "<|turn>",
+          "<turn|>",
+          "<tool_call|>",
+          "<tool_response|>",
+          "<eos>"
+        ]
+      }
+    }
+  },
+  "android_runner": {
+    "engine": "serenity_llama_jni",
+    "jni_library": "libserenity_llama.so",
+    "active_storage_path": "/storage/emulated/0/SerenityDroid/E2B",
+    "storage_options": [
+      {
+        "name": "Ghz S25+ Primary Internal",
+        "path": "/storage/emulated/0/SerenityDroid/E2B"
+      },
+      {
+        "name": "Download Directory",
+        "path": "/storage/emulated/0/Download/models"
+      },
+      {
+        "name": "App Private Sandbox",
+        "path": "/sdcard/Android/data/com.brainuke.serenitydroid/files/models"
+      }
+    ],
+    "accelerators": [
+      "GGML_OPENCL",
+      "QNN_HTP_V79_V81",
+      "LiteRT_NPU"
+    ],
+    "wake_word_supported": true,
+    "models": {
+      "gemma-4-E2B-mobile-ud": {
+        "path": "/storage/emulated/0/SerenityDroid/E2B/gemma-4-E2B-it-qat-UD-Q2_K_XL.gguf",
+        "mmproj": "/storage/emulated/0/SerenityDroid/E2B/mmproj-F16.gguf",
+        "role": "edge_reflex_vad",
+        "gpu_layers": 99,
+        "context_window": 4096,
+        "threads": 4,
+        "flash_attn": 1
+      },
+      "gemma-4-E2B-mobile-abliterated": {
+        "path": "/storage/emulated/0/SerenityDroid/E2B/Huihui-gemma-4-E2B-it-qat-q4_0-unquantized-abliterated-Q4_K.gguf",
+        "mmproj": "/storage/emulated/0/SerenityDroid/E2B/mmproj-F16.gguf",
+        "role": "edge_reflex_abliterated",
+        "gpu_layers": 99,
+        "context_window": 4096,
+        "threads": 4,
+        "flash_attn": 1
+      },
+      "gemma-4-E2B-mobile-ud-q4": {
+        "path": "/storage/emulated/0/SerenityDroid/E2B/gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf",
+        "mmproj": "/storage/emulated/0/SerenityDroid/E2B/mmproj-F16.gguf",
+        "role": "edge_reflex_ud_q4",
+        "gpu_layers": 99,
+        "context_window": 4096,
+        "threads": 4,
+        "flash_attn": 1
+      }
+    }
+  }
+}

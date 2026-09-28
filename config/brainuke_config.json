@@ -1,0 +1,19 @@
+{
+  "baseline_temperament": {
+    "valence": 0.2,
+    "arousal": 0.0,
+    "dominance": 0.8
+  },
+  "ou_process": {
+    "theta": 0.1,
+    "sigma": 0.05
+  },
+  "sampling": {
+    "base_temperature": 0.7,
+    "base_min_p": 0.05
+  },
+  "network": {
+    "discovery_port": 8080,
+    "throne_port": 8443
+  }
+}

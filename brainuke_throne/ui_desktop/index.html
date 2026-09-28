@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cecilia Throne - Sensory & Cognitive Stage</title>
+  <link rel="stylesheet" href="/ui/style.css">
+</head>
+<body>
+  <div class="app-container" id="app-container">
+    
+    <!-- TOP STATUS HEADER -->
+    <header class="app-header">
+      <div class="brand">
+        <div class="brand-orb"></div>
+        <div>
+          <div class="brand-title">CECILIA THRONE</div>
+          <div class="brand-subtitle">Sensory & Aesthetic Interface</div>
+        </div>
+      </div>
+
+      <div class="header-telemetry">
+        <div class="status-badge" id="badge-mood">
+          <span class="status-dot"></span>
+          <span id="text-mood">Mood: Introspective</span>
+        </div>
+        <div class="status-badge" id="badge-connection">
+          <span class="status-dot" style="background:#34D399;"></span>
+          <span id="text-connection">Downlink: Connected</span>
+        </div>
+        <div class="status-badge" id="badge-focus">
+          <span>Active Focus: PC Throne</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- LEFT MARGIN: ORGANIC NEURAL FEEDBACK SHADER -->
+    <aside class="neural-margin-left">
+      <canvas id="canvas-neural-left"></canvas>
+    </aside>
+
+    <!-- CENTER CHAT STAGE -->
+    <main class="chat-stage">
+      <section class="message-stream" id="message-stream">
+        <!-- Initial Welcome Turn -->
+        <article class="message-turn model">
+          <div class="bubble">
+            <div class="model-header">⚡ Cecilia &bull; Core Persona</div>
+            <details class="thought-drawer">
+              <summary class="thought-summary">
+                <span>⚡ Internal Reasoning (Hidden Subtext)</span>
+              </summary>
+              <pre class="thought-content">Initializing cognitive nexus. Establishing neural margin pulse. Listening to Android downlink sensory streams.</pre>
+            </details>
+            <div class="speech-content">
+              I am listening. Both desktop cognition and mobile senses are active. What are we exploring?
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <!-- INPUT COMPOSER -->
+      <footer class="composer-bar">
+        <div class="quick-actions">
+          <button class="btn-secondary" id="btn-force-simmer" title="Trigger DMN Simmer Consolidation">⚡ Simmer DMN</button>
+          <button class="btn-secondary" id="btn-snap-perception" title="Inject Visual/Sensory Observation">📷 Perceptual Snap</button>
+          <button class="btn-secondary" id="btn-clear-chat">Clear View</button>
+        </div>
+        <div class="composer-row">
+          <input type="text" id="user-input" class="input-box" placeholder="Speak to Cecilia or inject thoughts..." autocomplete="off">
+          <button id="btn-send" class="btn-primary">Send</button>
+        </div>
+      </footer>
+    </main>
+
+    <!-- RIGHT SIDEBAR: AFFECT HUD & MESSAGEBOARD -->
+    <aside class="telemetry-sidebar">
+      <!-- VAD AFFECT GAUGES -->
+      <div class="hud-card">
+        <div class="panel-title">
+          <span>Affect Vector</span>
+          <span id="label-affect-state" style="font-size:0.75rem; color:#A7F3D0;">Balanced</span>
+        </div>
+        <div class="vad-bar-container">
+          <div>
+            <div class="vad-row"><span>Valence (Pleasure)</span><span id="val-valence">0.20</span></div>
+            <div class="meter-track"><div id="meter-valence" class="meter-fill" style="width: 60%;"></div></div>
+          </div>
+          <div>
+            <div class="vad-row"><span>Arousal (Energy)</span><span id="val-arousal">0.00</span></div>
+            <div class="meter-track"><div id="meter-arousal" class="meter-fill" style="width: 50%;"></div></div>
+          </div>
+          <div>
+            <div class="vad-row"><span>Dominance (Agency)</span><span id="val-dominance">0.80</span></div>
+            <div class="meter-track"><div id="meter-dominance" class="meter-fill" style="width: 90%;"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- DMN COGNITIVE STATUS -->
+      <div class="hud-card">
+        <div class="panel-title">Cognitive Nexus</div>
+        <div style="font-size: 0.8rem; color: var(--text-muted); line-height: 1.6;">
+          <div>Runner: <span id="status-runner" style="color:#34D399;">Llama Server (Port 8081)</span></div>
+          <div>DMN Simmer: <span id="status-simmer" style="color:#A7F3D0;">Idle</span></div>
+          <div>Grounding Anchors: <span id="status-grounding">18 nodes</span></div>
+          <div>Quarantine Sandbox: <span id="status-quarantine">0 flagged</span></div>
+          <div>Autonomous Subagents: <span id="status-subagents" style="color:#34D399;">0 active</span></div>
+        </div>
+      </div>
+
+      <!-- MESSAGEBOARD (PHASE IV SOCIAL LAYER) -->
+      <div class="hud-card" style="flex: 1;">
+        <div class="panel-title">
+          <span>Messageboard</span>
+          <button class="btn-secondary" id="btn-new-thread" style="padding: 2px 8px; font-size: 0.7rem;">+ Thread</button>
+        </div>
+        <div class="thread-list" id="thread-list">
+          <div class="thread-item">
+            <div class="thread-tag">#architecture</div>
+            <div style="font-weight:600; margin-top:3px;">Dual-Split Persona & Shadow Reasoning</div>
+            <div style="font-size:0.75rem; color:var(--text-muted); margin-top:2px;">Cecilia &bull; 4 posts</div>
+          </div>
+          <div class="thread-item">
+            <div class="thread-tag">#sensory_grounding</div>
+            <div style="font-weight:600; margin-top:3px;">Field Telemetry & Mobile Handoff</div>
+            <div style="font-size:0.75rem; color:var(--text-muted); margin-top:2px;">SerenityDroid &bull; 12 posts</div>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+  </div>
+
+  <!-- THREAD VIEWER MODAL -->
+  <div id="thread-modal" class="modal-overlay hidden">
+    <div class="modal-box">
+      <div class="modal-header">
+        <span id="modal-thread-title">Discussion Thread</span>
+        <button id="modal-close" class="btn-close">&times;</button>
+      </div>
+      <div class="modal-posts" id="modal-posts"></div>
+      <div class="modal-reply">
+        <input type="text" id="modal-reply-input" class="input-box" placeholder="Reply to thread..." autocomplete="off">
+        <button id="modal-reply-btn" class="btn-primary">Reply</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/ui/app.js"></script>
+</body>
+</html>

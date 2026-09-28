@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.bak
+
+# Environment & IDE
+.idea/
+.vscode/
+*.iml
+
+# TLS Keys & Certificates (Keep public CA cert in Android resources)
+*.key
+*.pem
+*.crt
+!brainuke_extension/app/src/main/res/raw/*.crt
+
+# Local Databases & Sensitive Storage
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+
+# Model Weights
+models/**/*.gguf
+*.gguf
+
+# Android Builds & Keystores
+brainuke_extension/.gradle/
+brainuke_extension/.kotlin/
+brainuke_extension/build/
+brainuke_extension/app/build/
+brainuke_extension/local.properties
+*.apk
+*.aab
+
+# Local Scratch / Test Captures
+screencap_test*.png
+Screenshot_*.jpg
+weird output.txt
