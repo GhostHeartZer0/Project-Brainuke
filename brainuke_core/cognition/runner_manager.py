@@ -187,24 +187,34 @@ class PCRunnerManager:
     def set_custom_model_path(self, model_path: str, model_id: Optional[str] = None) -> Dict[str, Any]:
         """Sets a custom model path for active or custom model."""
         raw_path = str(model_path).strip()
-        normalized_path = os.path.normpath(os.path.abspath(raw_path))
+        if not raw_path.lower().endswith(".gguf"):
+            return {"status": "error", "error": "Model file must have a .gguf extension"}
 
-        # Containment check: access filesystem only within validated prefix branch
-        for base in self.get_candidate_model_dirs():
-            safe_root = os.path.normpath(os.path.abspath(str(base)))
-            safe_prefix = safe_root if safe_root.endswith(os.sep) else safe_root + os.sep
-            if normalized_path.startswith(safe_prefix) or normalized_path.lower().startswith(safe_prefix.lower()) or normalized_path == safe_root or normalized_path.lower() == safe_root.lower():
-                if not os.path.isfile(normalized_path):
-                    return {"status": "error", "error": f"Model file not found on disk: {raw_path}"}
-                cfg = self._ensure_config()
-                target_id = model_id or self.get_active_model_id()
-                models = cfg.setdefault("pc_runner", {}).setdefault("models", {})
-                target_cfg = models.setdefault(target_id, {})
-                target_cfg["path"] = normalized_path
-                self._save_config(cfg)
-                return {"status": "updated", "active_model": target_id, "path": normalized_path}
+        # Lexical containment check against allowed candidate model directories
+        if not self.is_path_within_allowed_dirs(raw_path):
+            return {"status": "error", "error": f"Model path outside permitted directories: {raw_path}"}
 
-        return {"status": "error", "error": f"Model path outside permitted directories: {raw_path}"}
+        # Resolve against server-confirmed models discovered by scanning candidate directories
+        norm_requested = os.path.normpath(raw_path).lower()
+        base_requested = os.path.basename(raw_path).lower()
+
+        available_models = self.scan_available_models()
+        model_lookup = {}
+        for m in available_models:
+            model_lookup[os.path.normpath(m["path"]).lower()] = m["path"]
+            model_lookup[m["name"].lower()] = m["path"]
+
+        matched_path = model_lookup.get(norm_requested) or model_lookup.get(base_requested)
+        if not matched_path:
+            return {"status": "error", "error": f"Model file not found on disk: {raw_path}"}
+
+        cfg = self._ensure_config()
+        target_id = model_id or self.get_active_model_id()
+        models = cfg.setdefault("pc_runner", {}).setdefault("models", {})
+        target_cfg = models.setdefault(target_id, {})
+        target_cfg["path"] = matched_path
+        self._save_config(cfg)
+        return {"status": "updated", "active_model": target_id, "path": matched_path}
 
     def select_model(self, alias_or_id: str, auto_reload: bool = True) -> Dict[str, Any]:
         """

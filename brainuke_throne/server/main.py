@@ -972,22 +972,12 @@ async def set_model_path_endpoint(request: Request):
     if not raw_path.lower().endswith(".gguf"):
         raise HTTPException(status_code=400, detail="Model file must have a .gguf extension")
 
-    # Path normalization
-    normalized_path = os.path.normpath(os.path.abspath(raw_path))
-
-    # Path traversal protection: access filesystem only within validated prefix branch
-    allowed_dirs = [os.path.normpath(os.path.abspath(str(d))) for d in pc_runner_manager.get_candidate_model_dirs()]
-    for safe_root in allowed_dirs:
-        safe_prefix = safe_root if safe_root.endswith(os.sep) else safe_root + os.sep
-        if normalized_path.startswith(safe_prefix) or normalized_path.lower().startswith(safe_prefix.lower()) or normalized_path == safe_root or normalized_path.lower() == safe_root.lower():
-            if not os.path.isfile(normalized_path):
-                raise HTTPException(status_code=400, detail="Model file not found on disk")
-            res = pc_runner_manager.set_custom_model_path(normalized_path)
-            if res.get("status") == "error":
-                raise HTTPException(status_code=400, detail=res.get("error"))
-            return res
-
-    raise HTTPException(status_code=403, detail="Model path outside permitted model directories")
+    res = pc_runner_manager.set_custom_model_path(raw_path)
+    if res.get("status") == "error":
+        err_msg = res.get("error", "")
+        status_code = 403 if "outside permitted" in err_msg.lower() else 400
+        raise HTTPException(status_code=status_code, detail=err_msg)
+    return res
 
 @app.post("/api/v1/models/load")
 async def load_model_endpoint(request: Request):

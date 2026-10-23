@@ -3,7 +3,7 @@
 ## [0.8.9] - 2026-10-23
 
 - `brainuke_core/cognition/runner_manager.py` & `brainuke_throne/server/main.py`:
-  - Resolved CodeQL High alerts #1, #3-#8 (Uncontrolled data used in path expression): refactored model path handling to eliminate unvalidated `Path().resolve()` calls on tainted inputs; nested `os.path.isfile()` directly inside inline `os.path.normpath(os.path.abspath(path)).startswith(safe_prefix)` containment checks against candidate model roots (`models/`, parent onedir `Models/`, `S:/LLM`, and configured directories). Added endpoint & manager traversal rejection tests.
+  - Resolved CodeQL High alerts (Uncontrolled data used in path expression): completely severed user-input taint to filesystem sinks; `set_custom_model_path()` now validates candidate root boundaries lexically and resolves models strictly via dictionary lookup against server-scanned GGUFs (`scan_available_models()`). User input is never passed to filesystem calls (`os.path.isfile`/`exists`/`resolve`).
   - Fixed exception and stack trace information exposure in `initiate_load()` and `POST /api/v1/models/load`: sanitized error return values into generic responses and status 500 exceptions, preventing internal stack traces from leaking to API callers.
 
 - `SerenityPC Legacy v1.8.0` Onedir Distro (`dist\SerenityPC Legacy v1.8.0`):
