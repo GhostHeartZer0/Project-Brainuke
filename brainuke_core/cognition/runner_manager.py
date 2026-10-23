@@ -74,14 +74,8 @@ class PCRunnerManager:
         if configured_path and os.path.exists(configured_path):
             return configured_path, True
 
-        # 2. Check workspace models/ folder fallback and parent onedir / SerenityPC Models folders
-        candidate_model_dirs = [
-            self.workspace_root / "models",
-            self.workspace_root.parent / "Models",
-            self.workspace_root.parent / "models",
-            self.workspace_root.parent.parent.parent / "Models",
-            self.workspace_root.parent.parent.parent / "models",
-        ]
+        # 2. Check workspace models/ folder fallback and candidate model folders
+        candidate_model_dirs = self.get_candidate_model_dirs()
         if model_id == self.NORMAL_MODEL_ID:
             for m_dir in candidate_model_dirs:
                 c1 = m_dir / "26B" / "gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf"
@@ -106,15 +100,76 @@ class PCRunnerManager:
 
         return configured_path or "unknown", False
 
-    def scan_available_models(self) -> List[Dict[str, Any]]:
-        """Scans candidate directories for available .gguf model files."""
-        candidate_model_dirs = [
+    def get_candidate_model_dirs(self) -> List[Path]:
+        """Returns candidate directories allowed for model files."""
+        dirs = [
             self.workspace_root / "models",
+            self.workspace_root,
             self.workspace_root.parent / "Models",
             self.workspace_root.parent / "models",
             self.workspace_root.parent.parent.parent / "Models",
             self.workspace_root.parent.parent.parent / "models",
         ]
+        if self.config_path:
+            dirs.append(self.config_path.parent)
+
+        s_llm = Path("S:/LLM")
+        if s_llm.exists():
+            dirs.append(s_llm)
+
+        cfg = self._ensure_config()
+        models = cfg.get("pc_runner", {}).get("models", {})
+        for m_info in models.values():
+            cfg_p = m_info.get("path")
+            if cfg_p:
+                try:
+                    p_obj = Path(cfg_p).resolve().parent
+                    if p_obj not in dirs:
+                        dirs.append(p_obj)
+                except Exception:
+                    pass
+        for extra in cfg.get("allowed_model_dirs", []):
+            if extra and isinstance(extra, str):
+                try:
+                    dirs.append(Path(extra).resolve())
+                except Exception:
+                    pass
+
+        seen = set()
+        resolved_dirs = []
+        for d in dirs:
+            try:
+                res = d.resolve()
+                if res.is_dir() and str(res) not in seen:
+                    seen.add(str(res))
+                    resolved_dirs.append(res)
+            except Exception:
+                pass
+        return resolved_dirs
+
+    def is_path_within_allowed_dirs(self, target_path: Path) -> bool:
+        """Verifies target path resides within an allowed model directory."""
+        try:
+            res_target = target_path.resolve()
+            for base in self.get_candidate_model_dirs():
+                base_res = base.resolve()
+                try:
+                    if res_target.is_relative_to(base_res):
+                        return True
+                except (ValueError, AttributeError):
+                    pass
+                try:
+                    if os.path.commonpath([str(base_res), str(res_target)]) == str(base_res):
+                        return True
+                except ValueError:
+                    continue
+        except Exception:
+            return False
+        return False
+
+    def scan_available_models(self) -> List[Dict[str, Any]]:
+        """Scans candidate directories for available .gguf model files."""
+        candidate_model_dirs = self.get_candidate_model_dirs()
         found = []
         seen = set()
         for m_dir in candidate_model_dirs:
@@ -137,7 +192,10 @@ class PCRunnerManager:
     def set_custom_model_path(self, model_path: str, model_id: Optional[str] = None) -> Dict[str, Any]:
         """Sets a custom model path for active or custom model."""
         clean_path = str(model_path).strip()
-        if not os.path.exists(clean_path):
+        target = Path(clean_path).resolve()
+        if not self.is_path_within_allowed_dirs(target):
+            return {"status": "error", "error": f"Model path outside permitted directories: {clean_path}"}
+        if not target.is_file():
             return {"status": "error", "error": f"Model file not found on disk: {clean_path}"}
         
         cfg = self._ensure_config()

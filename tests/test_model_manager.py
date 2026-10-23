@@ -191,6 +191,22 @@ class TestPCRunnerManager(unittest.TestCase):
         err_res = self.manager.set_custom_model_path(r"C:\fake\path\does_not_exist.gguf")
         self.assertEqual(err_res["status"], "error")
 
+    def test_path_containment_and_traversal_rejection(self):
+        # 1. Allowed path within workspace/temp dir
+        dummy_gguf = Path(self.temp_dir.name) / "allowed.gguf"
+        dummy_gguf.write_bytes(b"TEST")
+        self.assertTrue(self.manager.is_path_within_allowed_dirs(dummy_gguf))
+
+        # 2. Outside path traversal attempt rejected
+        with tempfile.TemporaryDirectory() as outside_dir:
+            outside_gguf = Path(outside_dir) / "evil.gguf"
+            outside_gguf.write_bytes(b"EXPLOIT")
+            self.assertFalse(self.manager.is_path_within_allowed_dirs(outside_gguf))
+
+            err_res = self.manager.set_custom_model_path(str(outside_gguf))
+            self.assertEqual(err_res["status"], "error")
+            self.assertIn("outside permitted", err_res["error"].lower())
+
 
 if __name__ == "__main__":
     unittest.main()
