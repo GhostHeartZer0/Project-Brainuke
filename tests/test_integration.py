@@ -322,15 +322,19 @@ def run_integration_tests():
     print("  -> Simmer Bus: Consolidation cycle executed.")
 
     # 6c. Verify [DMN Insight] arrived via SSE downlink strictly on 'thought' channel
-    time.sleep(1.0)
-    sse_active = False
+    dmn_insights = []
+    for _ in range(10):
+        dmn_insights = [
+            e for e in sse_events
+            if e.get("type") == "thought" and "[DMN Insight]" in e.get("content", "")
+        ]
+        if dmn_insights:
+            break
+        time.sleep(0.5)
 
-    dmn_insights = [
-        e for e in sse_events
-        if e.get("type") == "thought" and "[DMN Insight]" in e.get("content", "")
-    ]
     assert len(dmn_insights) > 0, "DMN Insight not received on SSE thought stream"
     print(f"  -> DMN Insight Verified on SSE Downlink: {dmn_insights[0]['content']}")
+    sse_active = False
 
     # 6d. Pull Delta Pack from Memory Vault
     req_sync_pull = urllib.request.Request(

@@ -80,7 +80,10 @@ class SimmerBus:
 
             distilled_text = ""
             if self.deep_cook and history_summary:
-                distilled_text = await self.deep_cook._distill_history(history_summary)
+                try:
+                    distilled_text = await self.deep_cook._distill_history(history_summary)
+                except Exception as e:
+                    distilled_text = ""
 
             # Suppress offline error strings from polluting long-term memory vault
             if not distilled_text or "[PC Core Offline]" in distilled_text:
@@ -124,15 +127,39 @@ class SimmerBus:
             if hasattr(self.vault, "apply_memory_decay"):
                 self.vault.apply_memory_decay(decay_rate=0.05)
 
-            # 6. Broadcast [DMN Insight] to SSE Downlink (Strictly thought channel, never voice)
+            # 6. Evaluate Volition Salience with Refined Resonance Coefficient
+            resonance_score = min(1.0, importance_weight / 1.5)
+            salience_data = self.core.calculate_volition_salience(
+                memory_resonance=resonance_score,
+                sensory_delta=min(1.0, len(sensory) / 10.0),
+                dt_since_event=0.0
+            )
+
+            # 7. Broadcast [DMN Insight] to SSE Downlink (Strictly thought channel, never voice)
             if self.broadcast_fn:
                 thought_content = f"[DMN Insight] [{concept_family}] {distilled_text}"
                 await self.broadcast_fn("thought", thought_content)
 
+                if salience_data["salience_score"] >= 0.85:
+                    volition_note = f"[Volition Candidate | Salience: {salience_data['salience_score']:.2f} >= 0.85 (Vital={salience_data['is_vital']})] Thematic equilibrium challenged: {distilled_text}"
+                    await self.broadcast_fn("thought", volition_note)
+                    if self.status_fn:
+                        try:
+                            await self.status_fn("volition_trigger", {
+                                "salience": salience_data["salience_score"],
+                                "topic": concept_family,
+                                "insight": distilled_text,
+                                "is_vital": salience_data["is_vital"],
+                                "proactive_prompt": f"Regarding [{concept_family}]: {distilled_text}"
+                            })
+                        except Exception:
+                            pass
+
             return {
                 "insight_id": insight_id,
                 "distilled_insight": distilled_text,
-                "affect_status": self.core.get_status()
+                "affect_status": self.core.get_status(),
+                "salience_data": salience_data
             }
         finally:
             self.is_simmering = False
@@ -150,7 +177,12 @@ class SimmerBus:
     async def start_simmer_loop(self):
         """Continuous background monitor for idle state."""
         while True:
-            await asyncio.sleep(5)
-            idle_duration = time.time() - self.last_activity_time
-            if idle_duration >= self.idle_timeout_sec:
-                await self.trigger_simmer_cycle(forced=False)
+            try:
+                await asyncio.sleep(5)
+                idle_duration = time.time() - self.last_activity_time
+                if idle_duration >= self.idle_timeout_sec:
+                    await self.trigger_simmer_cycle(forced=False)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                await asyncio.sleep(5)

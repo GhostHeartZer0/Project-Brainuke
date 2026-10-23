@@ -6,8 +6,13 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 
 @Database(
-    entities = [TelemetryEntity::class, MemoryNodeEntity::class, ConversationEntity::class],
-    version = 2,
+    entities = [
+        TelemetryEntity::class,
+        MemoryNodeEntity::class,
+        ConversationEntity::class,
+        FailedPromptEntity::class
+    ],
+    version = 4,
     exportSchema = false
 )
 abstract class BrainukeDatabase : RoomDatabase() {
@@ -15,6 +20,7 @@ abstract class BrainukeDatabase : RoomDatabase() {
     abstract fun telemetryDao(): TelemetryDao
     abstract fun memoryNodeDao(): MemoryNodeDao
     abstract fun conversationDao(): ConversationDao
+    abstract fun failedPromptDao(): FailedPromptDao
 
     companion object {
         @Volatile

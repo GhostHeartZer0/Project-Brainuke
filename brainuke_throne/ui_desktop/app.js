@@ -102,18 +102,28 @@
     messageStream.scrollTop = messageStream.scrollHeight;
   }
 
-  function createModelTurn(thought = "", speech = "") {
+  function createModelTurn(thought = "", speech = "", raw = "") {
     const turn = document.createElement("article");
     turn.className = "message-turn model";
     turn.innerHTML = `
       <div class="bubble">
         <div class="model-header">⚡ Cecilia &bull; Core Persona</div>
-        <details class="thought-drawer" ${thought ? "" : "style='display:none;'"}>
-          <summary class="thought-summary">
-            <span>⚡ Internal Reasoning (Hidden Subtext)</span>
-          </summary>
-          <pre class="thought-content">${escapeHtml(thought)}</pre>
-        </details>
+        <div class="drawers-row">
+          <details class="thought-drawer" ${thought ? "" : "style='display:none;'"}>
+            <summary class="thought-summary">
+              <span class="stage-tag">▶ Stage 1</span>
+              <span class="stage-name">Thoughts</span>
+            </summary>
+            <pre class="thought-content">${escapeHtml(thought)}</pre>
+          </details>
+          <details class="raw-drawer" ${raw ? "" : "style='display:none;'"}>
+            <summary class="raw-summary">
+              <span class="stage-tag">▶ Stage 2</span>
+              <span class="stage-name">Raw Response</span>
+            </summary>
+            <pre class="raw-content">${escapeHtml(raw)}</pre>
+          </details>
+        </div>
         <div class="speech-content">${escapeHtml(speech)}</div>
       </div>
     `;
@@ -138,6 +148,8 @@
     currentModelTurnElem = createModelTurn("Reasoning in shadows...", "...");
     const thoughtBox = currentModelTurnElem.querySelector(".thought-content");
     const drawer = currentModelTurnElem.querySelector(".thought-drawer");
+    const rawBox = currentModelTurnElem.querySelector(".raw-content");
+    const rawDrawer = currentModelTurnElem.querySelector(".raw-drawer");
     const speechBox = currentModelTurnElem.querySelector(".speech-content");
     drawer.style.display = "block";
 
@@ -157,6 +169,12 @@
 
       const data = await response.json();
       thoughtBox.textContent = data.thought || "(Reasoning complete)";
+      if (data.raw_response) {
+        rawBox.textContent = data.raw_response;
+        rawDrawer.style.display = "block";
+      } else {
+        rawDrawer.style.display = "none";
+      }
       speechBox.textContent = data.response || "(Silence)";
 
       // Update affect

@@ -50,11 +50,16 @@ data class MemoryNodeEntity(
 
 @Entity(
     tableName = "conversation_turns",
-    indices = [Index(value = ["isSynced"]), Index(value = ["timestamp"])]
+    indices = [
+        Index(value = ["turnUuid"], unique = true),
+        Index(value = ["isSynced"]),
+        Index(value = ["timestamp"])
+    ]
 )
 data class ConversationEntity(
     @PrimaryKey(autoGenerate = true)
     val id: Long = 0,
+    val turnUuid: String = java.util.UUID.randomUUID().toString(),
     val serverTurnId: Long? = null,
     val userInput: String,
     val thoughtStream: String = "",
@@ -67,6 +72,7 @@ data class ConversationEntity(
     fun toPayloadJson(): JSONObject {
         return JSONObject().apply {
             put("local_id", id)
+            put("turn_uuid", turnUuid)
             put("user_input", userInput)
             put("thought_stream", thoughtStream)
             put("final_response", finalResponse)
@@ -76,3 +82,21 @@ data class ConversationEntity(
         }
     }
 }
+
+@Entity(
+    tableName = "failed_prompt_buffer",
+    indices = [
+        Index(value = ["status"]),
+        Index(value = ["timestamp"])
+    ]
+)
+data class FailedPromptEntity(
+    @PrimaryKey(autoGenerate = true)
+    val id: Long = 0,
+    val promptText: String,
+    val targetMode: String = "throne",
+    val failureReason: String = "",
+    val retryCount: Int = 0,
+    val timestamp: Long = System.currentTimeMillis(),
+    val status: String = "pending"
+)

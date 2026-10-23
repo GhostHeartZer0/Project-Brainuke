@@ -146,6 +146,52 @@ class TestPCRunnerManager(unittest.TestCase):
         self.assertIn("cleared", res.final_response.lower())
         self.assertIn("intact", res.final_response.lower())
 
+    def test_stop_runner(self):
+        mock_proc = MagicMock()
+        mock_proc.pid = 9999
+        mock_proc.poll.return_value = None
+        self.manager._managed_process = mock_proc
+
+        res = self.manager.stop_runner()
+        self.assertEqual(res["status"], "stopped")
+        self.assertEqual(res["pid"], 9999)
+        self.assertTrue(res["stopped"])
+        mock_proc.terminate.assert_called_once()
+        self.assertIsNone(self.manager._managed_process)
+
+
+    def test_scan_available_models_and_auto_fallback(self):
+        # Create a mock models directory with a fallback .gguf
+        mock_models_dir = Path(self.temp_dir.name) / "models"
+        mock_models_dir.mkdir(parents=True, exist_ok=True)
+        fallback_gguf = mock_models_dir / "fallback_cerebrum.gguf"
+        fallback_gguf.write_bytes(b"GGUF_TEST_BYTES")
+
+        # Point workspace root to temp dir
+        self.manager.workspace_root = Path(self.temp_dir.name)
+
+        # 1. Test scanning
+        discovered = self.manager.scan_available_models()
+        self.assertTrue(any(d["name"] == "fallback_cerebrum.gguf" for d in discovered))
+
+        # 2. Test auto-fallback when configured path is missing
+        resolved_path, exists = self.manager.resolve_model_path("non_existent_model_id")
+        self.assertTrue(exists)
+        self.assertEqual(os.path.abspath(resolved_path), os.path.abspath(str(fallback_gguf)))
+
+    def test_set_custom_model_path(self):
+        dummy_gguf = Path(self.temp_dir.name) / "custom_model.gguf"
+        dummy_gguf.write_bytes(b"MOCK_MODEL")
+
+        res = self.manager.set_custom_model_path(str(dummy_gguf))
+        self.assertEqual(res["status"], "updated")
+        self.assertEqual(res["path"], str(dummy_gguf))
+
+        # Test invalid path error handling
+        err_res = self.manager.set_custom_model_path(r"C:\fake\path\does_not_exist.gguf")
+        self.assertEqual(err_res["status"], "error")
+
 
 if __name__ == "__main__":
     unittest.main()
+

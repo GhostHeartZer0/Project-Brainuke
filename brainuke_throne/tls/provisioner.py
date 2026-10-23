@@ -20,6 +20,9 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
 class TLSProvisioner:
     """Manages Root CA, Leaf Certs with SAN IP binding, and Port cleanup."""
 
@@ -113,13 +116,18 @@ class TLSProvisioner:
     @classmethod
     def ensure_root_ca_and_cert(
         cls,
-        ca_cert_path: str = "rootCA.pem",
-        ca_key_path: str = "rootCA.key",
-        cert_path: str = "cert.pem",
-        key_path: str = "cert.key",
+        ca_cert_path: Optional[str] = None,
+        ca_key_path: Optional[str] = None,
+        cert_path: Optional[str] = None,
+        key_path: Optional[str] = None,
         force_regen: bool = False
     ) -> Tuple[str, str, str]:
         """Creates 3072-bit Root CA and SHA-384 Leaf Certificate with multi-SAN binding."""
+        ca_cert_path = ca_cert_path or os.path.join(PROJECT_ROOT, "rootCA.pem")
+        ca_key_path = ca_key_path or os.path.join(PROJECT_ROOT, "rootCA.key")
+        cert_path = cert_path or os.path.join(PROJECT_ROOT, "cert.pem")
+        key_path = key_path or os.path.join(PROJECT_ROOT, "cert.key")
+
         if not force_regen and os.path.exists(ca_cert_path) and os.path.exists(cert_path) and os.path.exists(key_path):
             return ca_cert_path, cert_path, key_path
 
@@ -223,7 +231,8 @@ class CADownloaderServer:
     """HTTP server on port 8080 serving only rootCA.pem."""
 
     @staticmethod
-    def start(ca_path: str, port: int = 8080) -> HTTPServer:
+    def start(ca_path: Optional[str] = None, port: int = 8080) -> HTTPServer:
+        ca_path = ca_path or os.path.join(PROJECT_ROOT, "rootCA.pem")
         TLSProvisioner.free_port(port)
 
         class CAHandler(SimpleHTTPRequestHandler):

@@ -13,7 +13,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from brainuke_core.cognition.llama_client import LlamaServerClient
 from brainuke_core.memory.vault import MemoryVault
 from brainuke_core.security.key_vault import KeyVault
-from brainuke_throne.server.main import sync_status_endpoint, sync_trigger, sync_simmer, get_history_feed, last_sync_info, simmer_bus
+from brainuke_throne.server.main import (
+    sync_status_endpoint, sync_trigger, sync_simmer, get_history_feed,
+    stop_model_endpoint, last_sync_info, simmer_bus, pc_runner_manager,
+    sync_push, sync_pull
+)
+import brainuke_throne.server.main as main_server
+from unittest.mock import AsyncMock
 
 
 class TestSyncAndWeighting(unittest.IsolatedAsyncioTestCase):
@@ -28,10 +34,12 @@ class TestSyncAndWeighting(unittest.IsolatedAsyncioTestCase):
         gc.collect()
         self.temp_dir.cleanup()
 
-    def _make_mock_request(self):
+    def _make_mock_request(self, body=None, query_params=None):
         req = MagicMock()
         req.headers = {"Authorization": f"Bearer {self.token}"}
-        req.query_params = {}
+        req.query_params = query_params or {}
+        if body is not None:
+            req.json = AsyncMock(return_value=body)
         return req
 
     def test_vault_influence_weighting(self):
@@ -257,6 +265,260 @@ class TestSyncAndWeighting(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(insights[0]["concept_family"], "philosophy")
         self.assertEqual(insights[0]["importance_weight"], 1.5)
 
+    async def test_stop_model_endpoint(self):
+        req = self._make_mock_request()
+        orig_managed = pc_runner_manager._managed_process
+        mock_proc = MagicMock()
+        mock_proc.pid = 8888
+        mock_proc.poll.return_value = None
+        pc_runner_manager._managed_process = mock_proc
+        try:
+            res = await stop_model_endpoint(req)
+            self.assertEqual(res["status"], "stopped")
+            self.assertEqual(res["pid"], 8888)
+            mock_proc.terminate.assert_called_once()
+        finally:
+            pc_runner_manager._managed_process = orig_managed
+
+    def test_turn_uuid_deduplication(self):
+        """Ensures identical turn_uuid calls are deduplicated and idempotent."""
+        id1 = self.vault.ingest_interaction(
+            user_input="Test input",
+            thought_stream="Test thought",
+            final_response="Test response",
+            source_device="android",
+            turn_uuid="unique-turn-uuid-001"
+        )
+        id2 = self.vault.ingest_interaction(
+            user_input="Test input duplicate",
+            thought_stream="Test thought duplicate",
+            final_response="Test response duplicate",
+            source_device="android",
+            turn_uuid="unique-turn-uuid-001"
+        )
+        self.assertEqual(id1, id2)
+        interactions = self.vault.get_recent_interactions(limit=10)
+        self.assertEqual(len(interactions), 1)
+        self.assertEqual(interactions[0]["user_input"], "Test input")
+
+    def test_get_delta_pack_symmetric_pc_turns(self):
+        """Ensures get_delta_pack symmetrically returns PC turns and distilled insights."""
+        self.vault.ingest_interaction(
+            user_input="Hello from PC",
+            thought_stream="Thinking on PC",
+            final_response="Response from PC",
+            source_device="pc",
+            turn_uuid="pc-turn-001"
+        )
+        self.vault.ingest_interaction(
+            user_input="Hello from Mobile",
+            thought_stream="Thinking on Mobile",
+            final_response="Response from Mobile",
+            source_device="android",
+            turn_uuid="android-turn-001"
+        )
+        self.vault.archive_insight(insight="Consolidated DMN worldview test.")
+
+        delta = self.vault.get_delta_pack(since_timestamp=0)
+        self.assertEqual(len(delta["insights"]), 1)
+        self.assertEqual(delta["insights"][0]["insight"], "Consolidated DMN worldview test.")
+
+        # Symmetric pull: only PC turns returned to mobile
+        self.assertEqual(len(delta["pc_turns"]), 1)
+        self.assertEqual(delta["pc_turns"][0]["source_device"], "pc")
+        self.assertEqual(delta["pc_turns"][0]["user_input"], "Hello from PC")
+        self.assertEqual(delta["pc_turns"][0]["turn_uuid"], "pc-turn-001")
+
+        # High-water mark query: since_turn_id suppresses previously synced turns
+        max_turn_id = delta["max_turn_id"]
+        next_delta = self.vault.get_delta_pack(since_turn_id=max_turn_id)
+        self.assertEqual(len(next_delta["pc_turns"]), 0)
+
+    async def test_sync_push_endpoint_validation(self):
+        """Validates /api/v1/sync/push endpoint ingests telemetry & turns with deduplication."""
+        orig_vault = main_server.memory_vault
+        main_server.memory_vault = self.vault
+        try:
+            body = {
+                "sync_id": "test_sync_001",
+                "items": [
+                    {"type": "telemetry", "battery": 85, "timestamp": 1000}
+                ],
+                "conversation_turns": [
+                    {
+                        "turn_uuid": "mobile-turn-abc",
+                        "user_input": "Mobile prompt",
+                        "thought_stream": "Mobile thinking",
+                        "final_response": "Mobile reply",
+                        "affect_state": {"v": 0.5, "a": 0.2, "d": 0.7}
+                    }
+                ]
+            }
+            req = self._make_mock_request(body=body)
+            res = await sync_push(req)
+            self.assertEqual(res["status"], "queued")
+            self.assertEqual(res["count"], 1)
+            self.assertEqual(res["conversation_count"], 1)
+
+            # Verify in vault
+            turns = self.vault.get_recent_interactions(limit=10)
+            self.assertEqual(len(turns), 1)
+            self.assertEqual(turns[0]["turn_uuid"], "mobile-turn-abc")
+            self.assertEqual(turns[0]["source_device"], "android")
+            self.assertEqual(turns[0]["influence_weight"], 0.35)
+
+            # Re-pushing identical turn_uuid must be deduplicated
+            res_dup = await sync_push(req)
+            self.assertEqual(res_dup["status"], "queued")
+            turns_after = self.vault.get_recent_interactions(limit=10)
+            self.assertEqual(len(turns_after), 1)
+        finally:
+            main_server.memory_vault = orig_vault
+
+    async def test_sync_pull_endpoint_validation(self):
+        """Validates /api/v1/sync/pull endpoint returns symmetric PC turns & DMN insights."""
+        orig_vault = main_server.memory_vault
+        main_server.memory_vault = self.vault
+        try:
+            self.vault.ingest_interaction(
+                user_input="PC query",
+                thought_stream="PC thoughts",
+                final_response="PC speech",
+                source_device="pc",
+                turn_uuid="pc-uuid-101"
+            )
+            self.vault.ingest_interaction(
+                user_input="Mobile query",
+                thought_stream="Mobile thoughts",
+                final_response="Mobile speech",
+                source_device="android",
+                turn_uuid="mobile-uuid-101"
+            )
+            self.vault.archive_insight(
+                insight="Unified cognitive anchor.",
+                concept_family="core_telemetry"
+            )
+
+            req = self._make_mock_request()
+            res = await sync_pull(req, since=0, since_insight_id=0, since_turn_id=0)
+            self.assertEqual(res["status"], "ok")
+            self.assertEqual(len(res["insights"]), 1)
+            self.assertEqual(res["insights"][0]["insight"], "Unified cognitive anchor.")
+
+            # Symmetrical: only PC turns sent down to mobile
+            self.assertEqual(len(res["pc_turns"]), 1)
+            self.assertEqual(res["pc_turns"][0]["source_device"], "pc")
+            self.assertEqual(res["pc_turns"][0]["turn_uuid"], "pc-uuid-101")
+
+            # High-water mark suppresses re-pull
+            next_req = self._make_mock_request(query_params={
+                "since_turn_id": str(res["max_turn_id"]),
+                "since_insight_id": str(res["max_insight_id"])
+            })
+            res_next = await sync_pull(next_req)
+            self.assertEqual(len(res_next["pc_turns"]), 0)
+            self.assertEqual(len(res_next["insights"]), 0)
+        finally:
+            main_server.memory_vault = orig_vault
+
+    async def test_sync_full_four_step_cycle_e2e(self):
+        """Validates end-to-end 4-step sync cycle: Push -> Simmer -> Pull -> Status."""
+        orig_vault = main_server.memory_vault
+        main_server.memory_vault = self.vault
+        try:
+            # 1. Step 1: Android pushes unsynced conversation turn
+            push_body = {
+                "sync_id": "e2e_sync_test",
+                "items": [{"type": "battery", "level": 90}],
+                "conversation_turns": [
+                    {
+                        "turn_uuid": "e2e-turn-001",
+                        "user_input": "User on Android",
+                        "thought_stream": "Reflex processing",
+                        "final_response": "Reflex reply"
+                    }
+                ]
+            }
+            push_req = self._make_mock_request(body=push_body)
+            push_res = await sync_push(push_req)
+            self.assertEqual(push_res["status"], "queued")
+
+            # 2. Step 2: PC Throne registers a local turn
+            self.vault.ingest_interaction(
+                user_input="User on PC Throne",
+                thought_stream="Throne cognitive deliberation",
+                final_response="Throne authoritative reply",
+                source_device="pc",
+                turn_uuid="e2e-turn-002"
+            )
+
+            # 3. Step 3: DMN Simmer consolidates memory pool
+            self.vault.archive_insight(
+                insight="Consolidated dual-device coherence.",
+                concept_family="synthesis"
+            )
+
+            # 4. Step 4: Android pulls delta pack
+            pull_req = self._make_mock_request()
+            pull_res = await sync_pull(pull_req, since_turn_id=0, since_insight_id=0)
+            self.assertEqual(pull_res["status"], "ok")
+            self.assertTrue(any(i["insight"] == "Consolidated dual-device coherence." for i in pull_res["insights"]))
+            self.assertTrue(any(t["turn_uuid"] == "e2e-turn-002" for t in pull_res["pc_turns"]))
+            # Android's own turn must NOT be sent back to Android
+            self.assertFalse(any(t["turn_uuid"] == "e2e-turn-001" for t in pull_res["pc_turns"]))
+
+            # Verify status reflects active sync
+            status_req = self._make_mock_request()
+            status_res = await sync_status_endpoint(status_req)
+            self.assertEqual(status_res["status"], "ok")
+            self.assertIn("last_sync", status_res)
+        finally:
+            main_server.memory_vault = orig_vault
+
+    async def test_simmer_bus_volition_trigger_dispatch(self):
+        """Validates that SimmerBus dispatches volition_trigger status event on high salience."""
+        from brainuke_core.cognition.simmer_bus import SimmerBus
+        from brainuke_core.affect.engine import BrainukeCore
+
+        dispatched_events = []
+        async def mock_status_fn(event_type: str, data: dict):
+            dispatched_events.append((event_type, data))
+
+        core = BrainukeCore(baseline_mu={'v': 0.2, 'a': 0.0, 'd': 0.8})
+        # Set core in state that generates salience >= 0.85 (perturbation in dominance)
+        core.state.dominance = -0.5
+        mock_cook = MagicMock()
+        mock_cook._distill_history = AsyncMock(return_value="High importance thematic insight.")
+
+        # Seed unsimmered interaction
+        self.vault.ingest_interaction(
+            user_input="Core query",
+            thought_stream="Core thinking",
+            final_response="Core speech",
+            source_device="pc"
+        )
+
+        bus = SimmerBus(
+            vault=self.vault,
+            core=core,
+            deep_cook=mock_cook,
+            broadcast_fn=AsyncMock(),
+            status_fn=mock_status_fn
+        )
+
+        res = await bus.trigger_simmer_cycle(forced=True)
+        self.assertIsNotNone(res)
+        self.assertIn("salience_data", res)
+        # Verify volition_trigger event was dispatched
+        volition_events = [e for e in dispatched_events if e[0] == "volition_trigger"]
+        self.assertEqual(len(volition_events), 1)
+        v_data = volition_events[0][1]
+        self.assertGreaterEqual(v_data["salience"], 0.85)
+        self.assertIn("proactive_prompt", v_data)
+        self.assertIn("thematic insight", v_data["insight"])
+
 
 if __name__ == "__main__":
     unittest.main()
+
+

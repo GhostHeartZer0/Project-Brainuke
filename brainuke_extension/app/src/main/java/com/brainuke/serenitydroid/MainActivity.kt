@@ -27,13 +27,16 @@ import android.view.animation.AlphaAnimation
 import android.view.animation.Animation
 import android.widget.Button
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import android.content.res.ColorStateList
 import androidx.activity.ComponentActivity
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -43,6 +46,9 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import android.text.InputType
+import android.view.inputmethod.EditorInfo
 import com.brainuke.serenitydroid.inference.LocalInferenceEngine
 import com.brainuke.serenitydroid.model.BrainukeEvent
 import com.brainuke.serenitydroid.model.InferenceConfig
@@ -70,8 +76,10 @@ class MainActivity : ComponentActivity() {
     private lateinit var chatScrollView: ScrollView
     private lateinit var inputEditText: EditText
     private lateinit var modeToggleButton: Button
+    private lateinit var backlogChip: Button
     private lateinit var modelStatusChip: Button
     private lateinit var modelStorageButton: Button
+    private lateinit var throneLoadingOverlay: FrameLayout
     private lateinit var topFluidBar: View
     private lateinit var bottomFluidBar: View
 
@@ -92,11 +100,14 @@ class MainActivity : ComponentActivity() {
 
             updateStatus("Linked to Throne ($defaultThroneHost:$defaultThronePort)")
 
+            val prefs = getSharedPreferences("brainuke_prefs", Context.MODE_PRIVATE)
+            val cachedToken = prefs.getString("auth_token", defaultAuthToken) ?: defaultAuthToken
+
             val rootCaStream = resources.openRawResource(R.raw.rootca)
             val client = ThroneClient(
                 throneHost = defaultThroneHost,
                 thronePort = defaultThronePort,
-                authToken = defaultAuthToken,
+                authToken = cachedToken,
                 rootCaStream = rootCaStream
             )
             activeThroneClient = client
@@ -118,7 +129,23 @@ class MainActivity : ComponentActivity() {
             bindCamera()
             observeDownlink()
             observeModelLoadState()
-            triggerSync()
+            observeCognitiveAndBacklogStates()
+
+            // Dynamic pairing handshake to synchronize hardware token over ADB reverse / LAN
+            lifecycleScope.launch(Dispatchers.IO) {
+                val pairResult = client.pairWithThrone(deviceId = Build.MODEL ?: "Samsung_S25_Plus")
+                if (pairResult.isSuccess) {
+                    prefs.edit().putString("auth_token", client.authToken).apply()
+                    withContext(Dispatchers.Main) {
+                        updateStatus("Linked & Paired ($defaultThroneHost:$defaultThronePort)")
+                        triggerSync()
+                    }
+                } else {
+                    withContext(Dispatchers.Main) {
+                        triggerSync()
+                    }
+                }
+            }
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
@@ -245,7 +272,7 @@ class MainActivity : ComponentActivity() {
         }
 
         modeToggleButton = Button(this).apply {
-            text = "⚡ Offload: Throne"
+            text = "👑 Throne [Waiting]"
             textSize = 11f
             setTextColor(Color.WHITE)
             minWidth = 0
@@ -254,9 +281,25 @@ class MainActivity : ComponentActivity() {
             setPadding(28, 14, 28, 14)
             background = GradientDrawable().apply {
                 cornerRadius = 16f
-                setColor(Color.parseColor("#1E293B"))
+                setColor(Color.parseColor("#1E1B4B"))
+                setStroke(1, Color.parseColor("#4338CA"))
             }
             setOnClickListener { toggleInferenceMode() }
+        }
+
+        backlogChip = Button(this).apply {
+            text = "📥 Backlog (0)"
+            textSize = 11f
+            setTextColor(Color.parseColor("#94A3B8"))
+            minWidth = 0
+            minHeight = 0
+            includeFontPadding = false
+            setPadding(28, 14, 28, 14)
+            background = GradientDrawable().apply {
+                cornerRadius = 16f
+                setColor(Color.parseColor("#1E293B"))
+            }
+            setOnClickListener { showBacklogDialog() }
         }
 
         modelStatusChip = Button(this).apply {
@@ -335,6 +378,7 @@ class MainActivity : ComponentActivity() {
         }
 
         buttonRow.addView(modeToggleButton, createBtnParams())
+        buttonRow.addView(backlogChip, createBtnParams())
         buttonRow.addView(modelStatusChip, createBtnParams())
         buttonRow.addView(snapButton, createBtnParams())
         buttonRow.addView(syncButton, createBtnParams())
@@ -397,6 +441,15 @@ class MainActivity : ComponentActivity() {
             setBackgroundColor(Color.parseColor("#1E293B"))
             setPadding(28, 20, 28, 20)
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            inputType = InputType.TYPE_CLASS_TEXT or
+                    InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+                    InputType.TYPE_TEXT_FLAG_CAP_SENTENCES or
+                    InputType.TYPE_TEXT_FLAG_AUTO_CORRECT
+            isSingleLine = false
+            minLines = 1
+            maxLines = 5
+            gravity = Gravity.CENTER_VERTICAL or Gravity.START
+            imeOptions = EditorInfo.IME_ACTION_NONE
         }
 
         val sendButton = Button(this).apply {
@@ -417,7 +470,16 @@ class MainActivity : ComponentActivity() {
         rootLayout.addView(bottomFluidBar)
         rootLayout.addView(composerLayout)
 
-        setContentView(rootLayout)
+        val rootFrame = FrameLayout(this).apply {
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        }
+        rootFrame.addView(rootLayout)
+        rootFrame.addView(createThroneLoadingOverlay())
+
+        setContentView(rootFrame)
         checkAndRequestPermissions()
     }
 
@@ -479,6 +541,291 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun createThroneLoadingOverlay(): FrameLayout {
+        throneLoadingOverlay = FrameLayout(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+            setBackgroundColor(Color.parseColor("#E6070B14"))
+            visibility = View.GONE
+            isClickable = true
+            isFocusable = true
+
+            val card = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                setPadding(52, 44, 52, 44)
+                background = GradientDrawable().apply {
+                    cornerRadius = 24f
+                    setColor(Color.parseColor("#111827"))
+                    setStroke(2, Color.parseColor("#10B981"))
+                }
+                layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    Gravity.CENTER
+                )
+
+                val crownTitle = TextView(this@MainActivity).apply {
+                    text = "👑 THRONE COGNITIVE CORE"
+                    textSize = 15f
+                    typeface = Typeface.DEFAULT_BOLD
+                    setTextColor(Color.parseColor("#34D399"))
+                    gravity = Gravity.CENTER
+                }
+
+                val statusDesc = TextView(this@MainActivity).apply {
+                    text = "Thinking on Central Mind..."
+                    textSize = 13f
+                    setTextColor(Color.parseColor("#E2E8F0"))
+                    setPadding(0, 16, 0, 8)
+                    gravity = Gravity.CENTER
+                }
+
+                val subDesc = TextView(this@MainActivity).apply {
+                    text = "Synthesizing deep context & simmered memory"
+                    textSize = 11f
+                    setTextColor(Color.parseColor("#94A3B8"))
+                    gravity = Gravity.CENTER
+                }
+
+                val progressBar = ProgressBar(this@MainActivity).apply {
+                    isIndeterminate = true
+                    indeterminateTintList = ColorStateList.valueOf(Color.parseColor("#10B981"))
+                    setPadding(0, 24, 0, 0)
+                }
+
+                addView(crownTitle)
+                addView(statusDesc)
+                addView(subDesc)
+                addView(progressBar)
+            }
+            addView(card)
+        }
+        return throneLoadingOverlay
+    }
+
+    private fun setThroneLoading(active: Boolean) {
+        runOnUiThread {
+            throneLoadingOverlay.visibility = if (active) View.VISIBLE else View.GONE
+        }
+    }
+
+    private fun updateModeToggleDisplay() {
+        val service = sensoryService
+        val isThrone = service?.getInferenceMode() == SensoryService.InferenceMode.THRONE_OFFLOAD
+
+        runOnUiThread {
+            if (isThrone) {
+                val status = service?.throneCognitiveStatus?.value ?: SensoryService.CognitiveStatus.DISCONNECTED
+                when (status) {
+                    SensoryService.CognitiveStatus.THINKING -> {
+                        modeToggleButton.text = "👑 Throne [Thinking]"
+                        modeToggleButton.setTextColor(Color.parseColor("#6EE7B7"))
+                        modeToggleButton.background = GradientDrawable().apply {
+                            cornerRadius = 16f
+                            setColor(Color.parseColor("#312E81"))
+                            setStroke(2, Color.parseColor("#10B981"))
+                        }
+                    }
+                    SensoryService.CognitiveStatus.WAITING -> {
+                        modeToggleButton.text = "👑 Throne [Waiting]"
+                        modeToggleButton.setTextColor(Color.WHITE)
+                        modeToggleButton.background = GradientDrawable().apply {
+                            cornerRadius = 16f
+                            setColor(Color.parseColor("#1E1B4B"))
+                            setStroke(1, Color.parseColor("#4338CA"))
+                        }
+                    }
+                    SensoryService.CognitiveStatus.DISCONNECTED -> {
+                        modeToggleButton.text = "👑 Throne [Disconnected]"
+                        modeToggleButton.setTextColor(Color.parseColor("#FCA5A5"))
+                        modeToggleButton.background = GradientDrawable().apply {
+                            cornerRadius = 16f
+                            setColor(Color.parseColor("#450A0A"))
+                            setStroke(1, Color.parseColor("#991B1B"))
+                        }
+                    }
+                }
+            } else {
+                val status = service?.mobileCognitiveStatus?.value ?: SensoryService.CognitiveStatus.WAITING
+                val loadState = service?.getModelLoadState()?.value
+                val isLoaded = loadState is ModelLoadState.Loaded
+
+                when {
+                    status == SensoryService.CognitiveStatus.THINKING -> {
+                        modeToggleButton.text = "📱 Mobile [Thinking]"
+                        modeToggleButton.setTextColor(Color.parseColor("#6EE7B7"))
+                        modeToggleButton.background = GradientDrawable().apply {
+                            cornerRadius = 16f
+                            setColor(Color.parseColor("#064E3B"))
+                            setStroke(2, Color.parseColor("#34D399"))
+                        }
+                    }
+                    !isLoaded -> {
+                        modeToggleButton.text = "📱 Mobile [Standby]"
+                        modeToggleButton.setTextColor(Color.parseColor("#CBD5E1"))
+                        modeToggleButton.background = GradientDrawable().apply {
+                            cornerRadius = 16f
+                            setColor(Color.parseColor("#1E293B"))
+                            setStroke(1, Color.parseColor("#475569"))
+                        }
+                    }
+                    else -> {
+                        modeToggleButton.text = "📱 Mobile [Waiting]"
+                        modeToggleButton.setTextColor(Color.WHITE)
+                        modeToggleButton.background = GradientDrawable().apply {
+                            cornerRadius = 16f
+                            setColor(Color.parseColor("#0F766E"))
+                            setStroke(1, Color.parseColor("#14B8A6"))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun observeCognitiveAndBacklogStates() {
+        val service = sensoryService ?: return
+        lifecycleScope.launch {
+            service.throneCognitiveStatus.collect {
+                updateModeToggleDisplay()
+            }
+        }
+        lifecycleScope.launch {
+            service.mobileCognitiveStatus.collect {
+                updateModeToggleDisplay()
+            }
+        }
+        lifecycleScope.launch {
+            service.getSyncRepository().observePendingFailedPromptCount().collect { count ->
+                updateBacklogChip(count)
+            }
+        }
+        lifecycleScope.launch {
+            service.flushedTurns.collect { (prompt, result) ->
+                appendSystemNote("📥 Flushed Backlog Prompt: \"$prompt\"")
+                appendModelBubble(result.thought, result.speech)
+            }
+        }
+    }
+
+    private fun updateBacklogChip(count: Int) {
+        runOnUiThread {
+            backlogChip.text = "📥 Backlog ($count)"
+            if (count > 0) {
+                backlogChip.setTextColor(Color.parseColor("#FDE68A"))
+                backlogChip.background = GradientDrawable().apply {
+                    cornerRadius = 16f
+                    setColor(Color.parseColor("#78350F"))
+                    setStroke(1, Color.parseColor("#D97706"))
+                }
+            } else {
+                backlogChip.setTextColor(Color.parseColor("#94A3B8"))
+                backlogChip.background = GradientDrawable().apply {
+                    cornerRadius = 16f
+                    setColor(Color.parseColor("#1E293B"))
+                }
+            }
+        }
+    }
+
+    private fun showBacklogDialog() {
+        val service = sensoryService
+        if (service == null) {
+            Toast.makeText(this, "SensoryService not bound", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        lifecycleScope.launch(Dispatchers.IO) {
+            val pending = service.getSyncRepository().getPendingFailedPrompts()
+            withContext(Dispatchers.Main) {
+                val container = LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(36, 24, 36, 24)
+                    setBackgroundColor(Color.parseColor("#0F172A"))
+                }
+
+                val title = TextView(this@MainActivity).apply {
+                    text = "📥 Failed Prompt Backlog Queue"
+                    textSize = 16f
+                    typeface = Typeface.DEFAULT_BOLD
+                    setTextColor(Color.parseColor("#34D399"))
+                    setPadding(0, 0, 0, 16)
+                }
+                container.addView(title)
+
+                val summary = TextView(this@MainActivity).apply {
+                    text = if (pending.isEmpty()) "Buffer empty. All thoughts processed."
+                    else "Pending prompts: ${pending.size} (auto-flushes once engine reports ready)"
+                    textSize = 12f
+                    setTextColor(Color.parseColor("#E2E8F0"))
+                    setPadding(0, 0, 16, 16)
+                }
+                container.addView(summary)
+
+                val scroll = ScrollView(this@MainActivity).apply {
+                    layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 400)
+                }
+                val listLayout = LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                }
+
+                pending.forEach { item ->
+                    val card = LinearLayout(this@MainActivity).apply {
+                        orientation = LinearLayout.VERTICAL
+                        setPadding(20, 16, 20, 16)
+                        background = GradientDrawable().apply {
+                            cornerRadius = 12f
+                            setColor(Color.parseColor("#1E293B"))
+                        }
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply { setMargins(0, 0, 0, 12) }
+
+                        val promptView = TextView(this@MainActivity).apply {
+                            text = "\"${item.promptText}\""
+                            textSize = 13f
+                            typeface = Typeface.DEFAULT_BOLD
+                            setTextColor(Color.WHITE)
+                        }
+                        val metaView = TextView(this@MainActivity).apply {
+                            text = "Target: ${item.targetMode.uppercase()} | Retries: ${item.retryCount} | Error: ${item.failureReason}"
+                            textSize = 10f
+                            setTextColor(Color.parseColor("#94A3B8"))
+                            setPadding(0, 4, 0, 0)
+                        }
+                        addView(promptView)
+                        addView(metaView)
+                    }
+                    listLayout.addView(card)
+                }
+                scroll.addView(listLayout)
+                container.addView(scroll)
+
+                val flushBtn = Button(this@MainActivity).apply {
+                    text = "⚡ Force Flush Buffer Now"
+                    setTextColor(Color.parseColor("#070B14"))
+                    setBackgroundColor(Color.parseColor("#10B981"))
+                    setOnClickListener {
+                        lifecycleScope.launch {
+                            val count = service.flushFailedPromptBuffer()
+                            Toast.makeText(this@MainActivity, "Flushed $count prompt(s)", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+                container.addView(flushBtn)
+
+                AlertDialog.Builder(this@MainActivity)
+                    .setView(container)
+                    .setPositiveButton("Close", null)
+                    .show()
+            }
+        }
+    }
+
     private fun toggleInferenceMode() {
         val service = sensoryService ?: return
         val current = service.getInferenceMode()
@@ -488,15 +835,12 @@ class MainActivity : ComponentActivity() {
             SensoryService.InferenceMode.THRONE_OFFLOAD
         }
         service.setInferenceMode(next)
-        val isOffload = next == SensoryService.InferenceMode.THRONE_OFFLOAD
-        modeToggleButton.text = if (isOffload) {
-            "⚡ Offload: Throne"
-        } else {
-            "📱 Reflex: Local"
-        }
-        modeToggleButton.background = GradientDrawable().apply {
-            cornerRadius = 16f
-            setColor(Color.parseColor(if (isOffload) "#1E293B" else "#0F766E"))
+        updateModeToggleDisplay()
+        if (next == SensoryService.InferenceMode.THRONE_OFFLOAD) {
+            lifecycleScope.launch {
+                service.evaluateInferenceOffload()
+                updateModeToggleDisplay()
+            }
         }
     }
 
@@ -525,30 +869,38 @@ class MainActivity : ComponentActivity() {
 
         lifecycleScope.launch {
             val service = sensoryService
-            if (service != null) {
-                val isolatedResult = service.processInteraction(text)
-                appendModelBubble(isolatedResult.thought, isolatedResult.speech)
-            } else {
-                val client = activeThroneClient
-                if (client != null) {
-                    val res = client.sendInteraction(text)
-                    if (res.isSuccess) {
-                        try {
-                            val json = JSONObject(res.getOrThrow())
-                            val rawThought = json.optString("thought", "")
-                            val rawSpeech = json.optString("response", "...")
-                            val isolated = ThoughtIsolator.isolate(rawThought, rawSpeech)
-                            appendModelBubble(isolated.thought, isolated.speech)
-                        } catch (e: Exception) {
-                            val isolated = ThoughtIsolator.isolate("", res.getOrThrow())
-                            appendModelBubble(isolated.thought, isolated.speech)
+            val isThrone = service?.getInferenceMode() == SensoryService.InferenceMode.THRONE_OFFLOAD
+            if (isThrone) setThroneLoading(true)
+
+            try {
+                if (service != null) {
+                    val isolatedResult = service.processInteraction(text)
+                    appendModelBubble(isolatedResult.thought, isolatedResult.speech)
+                } else {
+                    val client = activeThroneClient
+                    if (client != null) {
+                        val res = client.sendInteraction(text)
+                        if (res.isSuccess) {
+                            try {
+                                val json = JSONObject(res.getOrThrow())
+                                val rawThought = json.optString("thought", "")
+                                val rawSpeech = json.optString("response", "...")
+                                val isolated = ThoughtIsolator.isolate(rawThought, rawSpeech)
+                                appendModelBubble(isolated.thought, isolated.speech)
+                            } catch (e: Exception) {
+                                val isolated = ThoughtIsolator.isolate("", res.getOrThrow())
+                                appendModelBubble(isolated.thought, isolated.speech)
+                            }
+                        } else {
+                            appendModelBubble("", "Error reaching Throne: ${res.exceptionOrNull()?.message}")
                         }
                     } else {
-                        appendModelBubble("", "Error reaching Throne: ${res.exceptionOrNull()?.message}")
+                        appendModelBubble("", "Cannot reach Throne or local SensoryService.")
                     }
-                } else {
-                    appendModelBubble("", "Cannot reach Throne or local SensoryService.")
                 }
+            } finally {
+                setThroneLoading(false)
+                updateModeToggleDisplay()
             }
         }
     }
@@ -1351,11 +1703,23 @@ class MainActivity : ComponentActivity() {
                         appendSystemNote("⚡ Conversation focus transitioned to ${event.targetDevice}")
                     }
                     is BrainukeEvent.SyncRequest -> {
-                        updateStatus("Sync requested by PC Throne")
-                        appendSystemNote("🔄 Bidirectional sync requested by PC Throne...")
+                        updateStatus("Sync requested by PC Throne (${event.action})")
+                        appendSystemNote("🔄 Sync requested by PC Throne (${event.action})...")
                     }
                     is BrainukeEvent.SyncUpdate -> {
-                        appendSystemNote("🔄 Sync update: ${event.summary}")
+                        if (event.status == "delta_ready") {
+                            appendSystemNote("🔄 DMN simmer complete on PC. Pulling delta...")
+                        } else {
+                            appendSystemNote("🔄 Sync update: ${event.summary}")
+                        }
+                    }
+                    is BrainukeEvent.VolitionTrigger -> {
+                        val topicStr = if (event.topic.isNotEmpty()) "[${event.topic}] " else ""
+                        appendSystemNote("⚡ Proactive Volition: ${topicStr}${event.insight}")
+                        activeModelThoughtView?.append("\n[Volition Trigger | Salience: ${String.format("%.2f", event.salience)}]: ${event.insight}")
+                        if (event.proactivePrompt.isNotEmpty() && activeModelSpeechView?.text.isNullOrEmpty()) {
+                            activeModelSpeechView?.text = "⚡ Cecilia: ${event.proactivePrompt}"
+                        }
                     }
                     is BrainukeEvent.Error -> {
                         updateStatus("Downlink Error: ${event.message}")
@@ -1470,7 +1834,17 @@ class MainActivity : ComponentActivity() {
         if (client == null) return
 
         lifecycleScope.launch {
-            val result = service.getSyncRepository().executeSync(client)
+            var result = service.getSyncRepository().executeSync(client)
+            val err = result.exceptionOrNull()?.message ?: ""
+            if (result.isFailure && (err.contains("401") || err.contains("403"))) {
+                val pairRes = client.pairWithThrone(deviceId = Build.MODEL ?: "Samsung_S25_Plus")
+                if (pairRes.isSuccess) {
+                    getSharedPreferences("brainuke_prefs", Context.MODE_PRIVATE)
+                        .edit().putString("auth_token", client.authToken).apply()
+                    result = service.getSyncRepository().executeSync(client)
+                }
+            }
+
             if (result.isSuccess) {
                 val s = result.getOrThrow()
                 updateStatus("Synced (Pushed ${s.pushedCount} sensory & ${s.conversationCount} turns | Pulled ${s.pulledCount} nodes)")

@@ -36,7 +36,7 @@ import javax.net.ssl.X509TrustManager
 class ThroneClient(
     private val throneHost: String,
     private val thronePort: Int = 8443,
-    private val authToken: String,
+    @Volatile var authToken: String,
     rootCaStream: InputStream
 ) {
     private val baseUrl = "https://$throneHost:$thronePort"
@@ -48,8 +48,9 @@ class ThroneClient(
         val (sslContext, trustManager) = configureTls(rootCaStream)
 
         val authInterceptor = Interceptor { chain ->
+            val currentToken = authToken
             val authenticatedRequest = chain.request().newBuilder()
-                .header("Authorization", "Bearer $authToken")
+                .header("Authorization", "Bearer $currentToken")
                 .header("User-Agent", "ProjectBrainuke/1.0")
                 .build()
             chain.proceed(authenticatedRequest)
@@ -125,6 +126,11 @@ class ThroneClient(
                 response = call.execute()
 
                 if (!response.isSuccessful) {
+                    if (response.code == 401 || response.code == 403) {
+                        try {
+                            pairWithThrone(android.os.Build.MODEL ?: "Samsung_S25_Plus")
+                        } catch (_: Exception) {}
+                    }
                     emit(BrainukeEvent.Error("SSE connection failed with HTTP ${response.code}"))
                     delay(backoffMs)
                     backoffMs = (backoffMs * 2).coerceAtMost(maxBackoffMs)
@@ -208,6 +214,23 @@ class ThroneClient(
             okHttpClient.newCall(request).execute().use { response ->
                 if (response.isSuccessful) {
                     Result.success(response.body?.string() ?: "{}")
+                } else if (response.code == 401 || response.code == 403) {
+                    val pairResult = pairWithThrone(android.os.Build.MODEL ?: "Samsung_S25_Plus")
+                    if (pairResult.isSuccess) {
+                        val retryReq = Request.Builder()
+                            .url("$baseUrl/api/v1/sync/push")
+                            .post(json.toRequestBody(jsonMediaType))
+                            .build()
+                        okHttpClient.newCall(retryReq).execute().use { retryResp ->
+                            if (retryResp.isSuccessful) {
+                                Result.success(retryResp.body?.string() ?: "{}")
+                            } else {
+                                Result.failure(IOException("Sync push failed after re-pair with HTTP ${retryResp.code}"))
+                            }
+                        }
+                    } else {
+                        Result.failure(IOException("Sync push failed with HTTP ${response.code} (re-pair failed)"))
+                    }
                 } else {
                     Result.failure(IOException("Sync push failed with HTTP ${response.code}"))
                 }
@@ -220,9 +243,14 @@ class ThroneClient(
     /**
      * DataSync: Pulls consolidated memory delta pack from Throne DMN.
      */
-    suspend fun pullSyncDelta(sinceEpochMs: Long = 0): Result<String> = withContext(Dispatchers.IO) {
+    suspend fun pullSyncDelta(
+        sinceEpochMs: Long = 0,
+        sinceInsightId: Long = 0,
+        sinceTurnId: Long = 0
+    ): Result<String> = withContext(Dispatchers.IO) {
+        val url = "$baseUrl/api/v1/sync/pull?since=$sinceEpochMs&since_insight_id=$sinceInsightId&since_turn_id=$sinceTurnId"
         val request = Request.Builder()
-            .url("$baseUrl/api/v1/sync/pull?since=$sinceEpochMs")
+            .url(url)
             .get()
             .build()
 
@@ -230,6 +258,23 @@ class ThroneClient(
             okHttpClient.newCall(request).execute().use { response ->
                 if (response.isSuccessful) {
                     Result.success(response.body?.string() ?: "{}")
+                } else if (response.code == 401 || response.code == 403) {
+                    val pairResult = pairWithThrone(android.os.Build.MODEL ?: "Samsung_S25_Plus")
+                    if (pairResult.isSuccess) {
+                        val retryReq = Request.Builder()
+                            .url(url)
+                            .get()
+                            .build()
+                        okHttpClient.newCall(retryReq).execute().use { retryResp ->
+                            if (retryResp.isSuccessful) {
+                                Result.success(retryResp.body?.string() ?: "{}")
+                            } else {
+                                Result.failure(IOException("Sync pull failed after re-pair with HTTP ${retryResp.code}"))
+                            }
+                        }
+                    } else {
+                        Result.failure(IOException("Sync pull failed with HTTP ${response.code} (re-pair failed)"))
+                    }
                 } else {
                     Result.failure(IOException("Sync pull failed with HTTP ${response.code}"))
                 }
@@ -256,13 +301,27 @@ class ThroneClient(
         try {
             okHttpClient.newCall(request).execute().use { response ->
                 if (response.isSuccessful) {
-                    Result.success(response.body?.string() ?: "{}")
+                    val body = response.body?.string() ?: "{}"
+                    try {
+                        val obj = org.json.JSONObject(body)
+                        val token = obj.optString("auth_token")
+                        if (token.isNotEmpty()) {
+                            authToken = token
+                        }
+                    } catch (_: Exception) {}
+                    Result.success(body)
                 } else {
                     Result.failure(IOException("Pairing failed with HTTP ${response.code}"))
                 }
             }
         } catch (e: Exception) {
             Result.failure(e)
+        }
+    }
+
+    fun updateAuthToken(newToken: String) {
+        if (newToken.isNotEmpty()) {
+            authToken = newToken
         }
     }
 

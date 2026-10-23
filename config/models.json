@@ -16,7 +16,7 @@
     ],
     "models": {
       "gemma-4-26B-A4B-it-qat-UD-Q4_K_XL": {
-        "path": "S:/LLM/gemma-4 QAT/26B-A4B/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf",
+        "path": "C:\\Users\\ccrg6\\Desktop\\Hub\\Project Brainuke\\models\\E2B\\gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf",
         "role": "heavy_intellect_supervisor",
         "gpu_layers": 8,
         "context_window": 32768,
@@ -36,7 +36,7 @@
         "path": "S:/LLM/gemma-4-unc/26B/gemma-4-26B-A4B-it-qat-q4_0-unquantized-uncensored-heretic-v2.i1-Q4_K_M.gguf",
         "role": "secret_uncensored",
         "gpu_layers": 8,
-        "context_window": 32768,
+        "context_window": 16384,
         "temperature": 0.8,
         "min_p": 0.05,
         "repeat_penalty": 1.1,

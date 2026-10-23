@@ -1,6 +1,7 @@
 # brainuke_throne/server/main.py
 # The Central Orchestrator for the Project Brainuke Throne.
 
+import os
 import sys
 from pathlib import Path
 
@@ -12,6 +13,7 @@ if project_root not in sys.path:
 import asyncio
 import json
 import time
+from contextlib import asynccontextmanager
 from typing import List, Optional
 from fastapi import FastAPI, WebSocket, Request, HTTPException, BackgroundTasks
 from fastapi.responses import StreamingResponse, RedirectResponse
@@ -35,8 +37,16 @@ from brainuke_core.session import SessionManager
 from brainuke_core.protocol import ProtocolEnvelope, PacketType, SessionHandoffPayload
 from brainuke_throne.tls.provisioner import TLSProvisioner, CADownloaderServer
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+    # Server shutdown: stop runner and clean up
+    pc_runner_manager.stop_runner()
+
+
 # Initialize the Throne
-app = FastAPI(title="Brainuke Throne")
+app = FastAPI(title="Brainuke Throne", lifespan=lifespan)
 
 # Public /ui webview static mount removed to prevent unauthenticated browser access to localhost.
 # UI is now hosted strictly inside desktop native Cecilia-UI.
@@ -64,6 +74,7 @@ last_sync_info: Dict[str, Any] = {
     "summary": "Never synced",
     "status": "idle"
 }
+pending_sync_push_events: Dict[str, asyncio.Event] = {}
 
 
 async def broadcast_to_sse(event_type: str, content: str):
@@ -212,20 +223,35 @@ async def cognitive_interact(request: Request):
 
     simmer_bus.record_activity()
 
+    # Pre-flight check: ensure PC llama-server is online and fully loaded
+    runner_status = pc_runner_manager.get_status(llama_client=llama_client)
+    if not runner_status.get("online", False):
+        memory_vault.buffer_failed_prompt(user_input, failure_reason="model_loading_or_offline", target_mode="pc")
+        raise HTTPException(
+            status_code=503,
+            detail="PC model is currently loading into memory or offline. Prompt preserved in backlog buffer."
+        )
+
     async def _on_thought_chunk(chunk: str):
         await broadcast_to_sse("thought_chunk", chunk)
 
     async def _on_speech_chunk(chunk: str):
         await broadcast_to_sse("speech_chunk", chunk)
 
-    result = await orchestrator.process_interaction(
-        user_input=user_input,
-        context=context,
-        on_thought_chunk=_on_thought_chunk,
-        on_speech_chunk=_on_speech_chunk
-    )
+    try:
+        result = await orchestrator.process_interaction(
+            user_input=user_input,
+            context=context,
+            on_thought_chunk=_on_thought_chunk,
+            on_speech_chunk=_on_speech_chunk
+        )
+    except Exception as e:
+        memory_vault.buffer_failed_prompt(user_input, failure_reason=f"inference_error: {str(e)[:100]}", target_mode="pc")
+        raise HTTPException(status_code=500, detail=f"Inference processing error: {str(e)}")
 
-    # Broadcast final full thought and speech over Downlink SSE
+    # Broadcast final full thought, raw response (if present), and speech over Downlink SSE
+    if getattr(result, "raw_response", None):
+        await broadcast_to_sse("raw_response", result.raw_response)
     await broadcast_to_sse("thought", result.thought_stream)
     await broadcast_to_sse("speech", result.final_response)
 
@@ -244,10 +270,12 @@ async def cognitive_interact(request: Request):
         "arousal": brainuke_core.state.arousal,
         "dominance": brainuke_core.state.dominance
     }
+    raw_resp_str = getattr(result, "raw_response", "") or ""
     memory_vault.ingest_interaction(
         user_input=user_input,
         thought_stream=result.thought_stream,
         final_response=result.final_response,
+        raw_response=raw_resp_str,
         affect_state=affect_snapshot,
         source_device="pc",
         influence_weight=1.0
@@ -256,16 +284,28 @@ async def cognitive_interact(request: Request):
         user_input=user_input,
         thought_stream=result.thought_stream,
         final_response=result.final_response,
+        raw_response=raw_resp_str,
         affect_state=affect_snapshot,
         source_device="pc"
     )
 
+    is_offline_diagnostic = (
+        "[Diagnostic] PC llama-server (port 8081) is offline or initializing" in result.thought_stream
+        and not result.final_response.strip()
+    )
+    if is_offline_diagnostic:
+        memory_vault.buffer_failed_prompt(user_input, failure_reason="model_offline", target_mode="pc")
+
     return {
-        "status": "success",
+        "status": "buffered" if is_offline_diagnostic else "success",
         "thought": result.thought_stream,
+        "raw_response": raw_resp_str,
         "response": result.final_response,
         "affect_impulse": result.affect_impulse,
-        "core_state": brainuke_core.get_status()
+        "core_state": brainuke_core.get_status(),
+        "buffered": is_offline_diagnostic,
+        "telemetry": llama_client.get_telemetry() if hasattr(llama_client, "get_telemetry") else {},
+        "context_metrics": getattr(result, "context_metrics", {})
     }
 
 @app.get("/api/v1/cognitive/status")
@@ -278,6 +318,9 @@ async def cognitive_status(request: Request):
 
     runner_online = llama_client.is_healthy() if hasattr(llama_client, "is_healthy") else True
     grounding = memory_vault.get_recent_grounding(limit=20)
+    runner_st = pc_runner_manager.get_status(llama_client=llama_client)
+    pending_count = memory_vault.get_pending_count(target_mode="pc")
+
     return {
         "status": "online" if runner_online else "degraded",
         "offload_recommended": True,
@@ -294,8 +337,52 @@ async def cognitive_status(request: Request):
         "last_sync_summary": last_sync_info.get("summary", "Never synced"),
         "is_simmering": simmer_bus.is_simmering,
         "last_simmer": int(simmer_bus.last_simmer_time * 1000) if getattr(simmer_bus, "last_simmer_time", None) else None,
-        "timestamp": int(time.time() * 1000)
+        "timestamp": int(time.time() * 1000),
+        "queue_pending_count": pending_count,
+        "hardware": runner_st.get("hardware", {}),
+        "telemetry": runner_st.get("telemetry", {}),
+        "context_metrics": orchestrator.get_context_metrics() if hasattr(orchestrator, "get_context_metrics") else {}
     }
+
+
+# --- PROMPT BACKLOG QUEUE ENDPOINTS ---
+
+@app.get("/api/v1/queue/pending")
+async def get_pending_queue_endpoint(request: Request):
+    """Returns all pending prompts in unfinished queue."""
+    verify_machine_token(request)
+    pending = memory_vault.get_pending_failed_prompts(target_mode="pc")
+    return {"pending": pending, "count": len(pending)}
+
+@app.post("/api/v1/queue/buffer")
+async def buffer_prompt_endpoint(request: Request):
+    """Explicitly buffers an unfinished prompt."""
+    verify_machine_token(request)
+    body = await request.json()
+    prompt = body.get("prompt", "")
+    reason = body.get("reason", "manual_or_offline")
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Missing 'prompt'")
+    pid = memory_vault.buffer_failed_prompt(prompt, failure_reason=reason, target_mode="pc")
+    return {"status": "buffered", "id": pid, "count": memory_vault.get_pending_count(target_mode="pc")}
+
+@app.post("/api/v1/queue/flush")
+async def flush_queue_endpoint(request: Request):
+    """Marks pending prompt(s) as flushed."""
+    verify_machine_token(request)
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    prompt_id = body.get("id")
+    if prompt_id:
+        memory_vault.mark_prompt_status(prompt_id, "flushed")
+    else:
+        pending = memory_vault.get_pending_failed_prompts(target_mode="pc")
+        for p in pending:
+            memory_vault.mark_prompt_status(p["id"], "flushed")
+    return {"status": "flushed", "remaining": memory_vault.get_pending_count(target_mode="pc")}
 
 
 # --- SECURE ZERO-TOUCH PAIRING & SESSION HANDOFF ---
@@ -382,26 +469,29 @@ async def sync_push(request: Request):
     """
     Android Sync Push endpoint:
     Receives buffered telemetry and interaction batch from SerenityDroid.
-    Queues them in the PC pool host for future DMN simmer cycle.
+    Queues them in the PC pool host with turn_uuid deduplication for future DMN simmer cycle.
     """
     verify_machine_token(request)
 
     body = await request.json()
+    sync_id = body.get("sync_id")
     items = body.get("items", [])
     count = memory_vault.ingest_sensory_batch(items, source="android_sync_push")
 
-    # Ingest conversation turns if present with mobile weight 0.35
+    # Ingest conversation turns if present with mobile weight 0.35 and turn_uuid dedup
     conversation_turns = body.get("conversation_turns", [])
     if conversation_turns:
         session_manager.ingest_external_turns(conversation_turns)
         for turn in conversation_turns:
+            turn_uuid = turn.get("turn_uuid") or turn.get("uuid")
             memory_vault.ingest_interaction(
                 user_input=turn.get("user_input", ""),
                 thought_stream=turn.get("thought_stream", ""),
                 final_response=turn.get("final_response", ""),
                 affect_state=turn.get("affect_state", {}),
                 source_device="android",
-                influence_weight=0.35
+                influence_weight=0.35,
+                turn_uuid=turn_uuid
             )
 
     simmer_bus.record_activity()
@@ -410,6 +500,13 @@ async def sync_push(request: Request):
     last_sync_info["source"] = "android"
     last_sync_info["summary"] = f"Pushed {count} sensory & {len(conversation_turns)} turns"
     last_sync_info["status"] = "idle"
+
+    # Signal pending trigger waiters that push arrived
+    if sync_id and sync_id in pending_sync_push_events:
+        pending_sync_push_events[sync_id].set()
+    else:
+        for evt in list(pending_sync_push_events.values()):
+            evt.set()
 
     raw_sync = json.dumps({"type": "sync_update", "data": last_sync_info})
     for q in list(active_clients):
@@ -424,14 +521,35 @@ async def sync_push(request: Request):
     }
 
 @app.get("/api/v1/sync/pull")
-async def sync_pull(request: Request, since: int = 0):
+async def sync_pull(request: Request, since: int = 0, since_insight_id: int = 0, since_turn_id: int = 0):
     """
     Android Sync Pull endpoint:
-    Returns distilled memory nodes and world updates created since given timestamp.
+    Returns distilled memory nodes and PC dialogue turns created since given sequence IDs / timestamp.
     """
     verify_machine_token(request)
 
-    delta_pack = memory_vault.get_delta_pack(since_timestamp=since)
+    if since == 0 and "since" in getattr(request, "query_params", {}):
+        try:
+            since = int(request.query_params["since"])
+        except ValueError:
+            pass
+    if since_insight_id == 0 and "since_insight_id" in getattr(request, "query_params", {}):
+        try:
+            since_insight_id = int(request.query_params["since_insight_id"])
+        except ValueError:
+            pass
+    if since_turn_id == 0 and "since_turn_id" in getattr(request, "query_params", {}):
+        try:
+            since_turn_id = int(request.query_params["since_turn_id"])
+        except ValueError:
+            pass
+
+    delta_pack = memory_vault.get_delta_pack(
+        since_timestamp=since,
+        since_insight_id=since_insight_id,
+        since_turn_id=since_turn_id,
+        include_pc_turns=True
+    )
     now_ms = int(time.time() * 1000)
     last_sync_info["timestamp"] = now_ms
     last_sync_info["source"] = "android"
@@ -439,7 +557,13 @@ async def sync_pull(request: Request, since: int = 0):
     return {
         "status": "ok",
         "since": since,
-        "delta_pack": delta_pack,
+        "since_insight_id": since_insight_id,
+        "since_turn_id": since_turn_id,
+        "delta_pack": delta_pack.get("insights", []),
+        "insights": delta_pack.get("insights", []),
+        "pc_turns": delta_pack.get("pc_turns", []),
+        "max_insight_id": delta_pack.get("max_insight_id", 0),
+        "max_turn_id": delta_pack.get("max_turn_id", 0),
         "last_sync": now_ms,
         "core_state": brainuke_core.get_status()
     }
@@ -484,35 +608,77 @@ async def sync_simmer(request: Request):
 async def sync_trigger(request: Request):
     """
     PC-initiated synchronization:
-    1. Broadcasts sync_request event to Android clients over SSE Downlink.
-    2. Launches DMN simmer consolidation in background.
-    3. Updates last_sync status and broadcasts sync_update.
+    1. Broadcasts sync_request event (action='push_first') to Android over SSE Downlink.
+    2. Awaits push (up to 4.0s) then launches DMN simmer consolidation in background.
+    3. Broadcasts delta_ready so Android immediately pulls new insights and PC dialogue turns.
+    4. Updates last_sync status and broadcasts sync_update.
     """
     verify_machine_token(request)
 
     now_ms = int(time.time() * 1000)
+    sync_id = f"sync_{now_ms}"
+    push_event = asyncio.Event()
+    pending_sync_push_events[sync_id] = push_event
+
     last_sync_info["source"] = "pc"
     last_sync_info["status"] = "in_progress"
     last_sync_info["summary"] = "PC-triggered sync in progress"
 
-    # Broadcast sync request event over SSE Downlink to Android
-    sync_req_payload = json.dumps({"type": "sync_request", "source": "pc", "timestamp": now_ms})
+    # Broadcast sync request event over SSE Downlink to Android requesting push first
+    sync_req_payload = json.dumps({
+        "type": "sync_request",
+        "source": "pc",
+        "action": "push_first",
+        "sync_id": sync_id,
+        "timestamp": now_ms
+    })
     for q in list(active_clients):
         await q.put(sync_req_payload)
 
     # Broadcast in-progress sync update
-    prog_payload = json.dumps({"type": "sync_update", "data": {"status": "in_progress", "source": "pc"}})
+    prog_payload = json.dumps({
+        "type": "sync_update",
+        "data": {
+            "status": "in_progress",
+            "source": "pc",
+            "sync_id": sync_id
+        }
+    })
     for q in list(active_clients):
         await q.put(prog_payload)
 
     async def _bg_sync():
         try:
+            # 1. Await Android push (up to 4.0s timeout if offline/no clients connected)
+            if active_clients:
+                try:
+                    await asyncio.wait_for(push_event.wait(), timeout=4.0)
+                except asyncio.TimeoutError:
+                    pass
+            # 2. Trigger DMN consolidation on combined pool
             await simmer_bus.trigger_simmer_cycle(forced=False)
         finally:
+            pending_sync_push_events.pop(sync_id, None)
             finished_ms = int(time.time() * 1000)
             last_sync_info["status"] = "idle"
             last_sync_info["timestamp"] = finished_ms
             last_sync_info["summary"] = "PC Throne and Android companion aligned"
+
+            # 3. Broadcast delta_ready event so Android pulls fresh insights and PC turns
+            delta_ready_payload = json.dumps({
+                "type": "sync_update",
+                "data": {
+                    "status": "delta_ready",
+                    "sync_id": sync_id,
+                    "timestamp": finished_ms,
+                    "last_sync": finished_ms,
+                    "source": "pc"
+                }
+            })
+            for q in list(active_clients):
+                await q.put(delta_ready_payload)
+
+            # 4. Final idle broadcast
             done_payload = json.dumps({
                 "type": "sync_update",
                 "data": {
@@ -529,6 +695,7 @@ async def sync_trigger(request: Request):
 
     return {
         "status": "sync_triggered",
+        "sync_id": sync_id,
         "last_sync": last_sync_info.get("timestamp") or now_ms,
         "source": "pc",
         "in_progress": True,
@@ -551,13 +718,33 @@ async def sync_status_endpoint(request: Request):
     }
 
 @app.get("/api/v1/history")
-async def get_history_feed(request: Request, limit: int = 50, filter: str = "all"):
+async def get_history_feed(request: Request, limit: int = 50, filter: str = "all", q: Optional[str] = None):
     """
     Retrieves chronological conversation history and DMN refined insights.
     Surfaces hierarchical weighting: PC Master Core (1.0) >> Android Companion (0.35) >> Telemetry Oracle (0.2).
     Supported filters: 'all', 'pc', 'android', 'dmn'.
+    Supports 'q' for cross-temporal keyword search with priority to simmered thoughts.
     """
     verify_machine_token(request)
+
+    if q and q.strip():
+        search_res = memory_vault.search_memory(query=q.strip(), limit=limit)
+        return {
+            "status": "ok",
+            "filter": filter,
+            "query": q.strip(),
+            "weights": {
+                "pc_master": 1.0,
+                "android_companion": 0.35,
+                "telemetry_oracle": 0.2
+            },
+            "interactions": search_res.get("historical_interactions", []) + search_res.get("recent_prompts", []),
+            "recent_prompts": search_res.get("recent_prompts", []),
+            "dmn_insights": search_res.get("simmered_insights", []),
+            "total_interactions": len(search_res.get("historical_interactions", [])) + len(search_res.get("recent_prompts", [])),
+            "total_dmn": len(search_res.get("simmered_insights", [])),
+            "timestamp": int(time.time() * 1000)
+        }
 
     interactions = []
     dmn_insights = []
@@ -768,6 +955,25 @@ async def select_model_endpoint(request: Request):
     res = pc_runner_manager.select_model(model_key)
     return res
 
+@app.get("/api/v1/models/scan")
+async def scan_models_endpoint(request: Request):
+    """Scans and returns all available .gguf models found across candidate directories."""
+    verify_machine_token(request)
+    return {"status": "ok", "models": pc_runner_manager.scan_available_models()}
+
+@app.post("/api/v1/models/path")
+async def set_model_path_endpoint(request: Request):
+    """Binds a custom GGUF path for the active model."""
+    verify_machine_token(request)
+    body = await request.json()
+    path = body.get("path", "").strip()
+    if not path:
+        raise HTTPException(status_code=400, detail="Missing model 'path'")
+    res = pc_runner_manager.set_custom_model_path(path)
+    if res.get("status") == "error":
+        raise HTTPException(status_code=400, detail=res.get("error"))
+    return res
+
 @app.post("/api/v1/models/load")
 async def load_model_endpoint(request: Request):
     """Initiates model load/runner launch on PC port 8081."""
@@ -779,6 +985,14 @@ async def load_model_endpoint(request: Request):
         pass
     model_key = body.get("model")
     res = pc_runner_manager.initiate_load(model_key)
+    return res
+
+@app.post("/api/v1/models/stop")
+async def stop_model_endpoint(request: Request):
+    """Stops the llama-server runner on port 8081 and drops model from memory."""
+    verify_machine_token(request)
+    res = pc_runner_manager.stop_runner()
+    await broadcast_to_sse("notice", "PC Core runner stopped. Model released from memory.")
     return res
 
 @app.post("/api/v1/models/settings")
@@ -948,7 +1162,17 @@ async def run_throne():
     Orchestrates the startup of the various sub-systems.
     """
     print("[Throne] Initializing Cryptographic Foundation, Firewall & ADB Reverse Tethering...")
-    TLSProvisioner.ensure_root_ca_and_cert()
+    ca_cert_path = os.path.join(project_root, "rootCA.pem")
+    ca_key_path = os.path.join(project_root, "rootCA.key")
+    cert_path = os.path.join(project_root, "cert.pem")
+    cert_key_path = os.path.join(project_root, "cert.key")
+
+    TLSProvisioner.ensure_root_ca_and_cert(
+        ca_cert_path=ca_cert_path,
+        ca_key_path=ca_key_path,
+        cert_path=cert_path,
+        key_path=cert_key_path
+    )
     TLSProvisioner.ensure_firewall_rules()
     if TLSProvisioner.ensure_adb_reverse():
         print("[Throne] ADB reverse tethering active (ports 8443, 8080, 8081).")
@@ -956,7 +1180,7 @@ async def run_throne():
         print("[Throne] ADB reverse: no USB device attached or ADB offline (Wi-Fi LAN active).")
     
     print("[Throne] Starting Discovery Server (Port 8080)...")
-    CADownloaderServer.start("rootCA.pem", 8080)
+    CADownloaderServer.start(ca_cert_path, 8080)
 
     print("[Throne] Starting DMN Shared Simmer Bus...")
     asyncio.create_task(simmer_bus.start_simmer_loop())
@@ -964,7 +1188,7 @@ async def run_throne():
     print("[Throne] Starting Throne MCP/SSE Server (Port 8443)...")
     # Run the FastAPI app using uvicorn on port 8443
     import uvicorn
-    config = uvicorn.Config(app, host="0.0.0.0", port=8443, ssl_keyfile="cert.key", ssl_certfile="cert.pem")
+    config = uvicorn.Config(app, host="0.0.0.0", port=8443, ssl_keyfile=cert_key_path, ssl_certfile=cert_path)
     server = uvicorn.Server(config)
     await server.serve()
 

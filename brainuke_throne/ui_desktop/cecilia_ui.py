@@ -22,6 +22,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 import json
+import re
 import ssl
 import time
 import queue
@@ -30,7 +31,7 @@ import subprocess
 import urllib.request
 import urllib.error
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 
 # Windows High-DPI awareness
 if sys.platform == "win32":
@@ -126,7 +127,16 @@ class CeciliaThroneDesktopApp:
         self.streaming_thought_lbl = None
         self.streaming_thought_text = ""
         self.streaming_speech_started = False
+        self._last_dispatched_prompt = ""
 
+        # Unfinished prompt queue backlog & Telemetry (Option C)
+        self.pending_prompt_backlog: List[str] = []
+        self.last_runner_was_online = False
+        self.last_hardware_telemetry: Dict[str, Any] = {}
+        self.last_stream_telemetry: Dict[str, Any] = {}
+        self.last_context_metrics: Dict[str, Any] = {}
+
+        self.server_proc: Optional[subprocess.Popen] = None
         self._build_ui()
         self._ensure_throne_server_running()
         self._start_sse_listener()
@@ -151,10 +161,11 @@ class CeciliaThroneDesktopApp:
 
             self.event_queue.put(("notice", "Throne Server offline (Port 8443). Auto-launching Throne in background..."))
             server_main = os.path.join(project_root, "brainuke_throne", "server", "main.py")
+            py_bin = self._find_python_interpreter()
             try:
                 flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-                subprocess.Popen(
-                    [sys.executable, server_main],
+                self.server_proc = subprocess.Popen(
+                    [py_bin, server_main],
                     creationflags=flags,
                     cwd=project_root
                 )
@@ -168,6 +179,24 @@ class CeciliaThroneDesktopApp:
                 self.event_queue.put(("error", f"Failed to auto-launch Throne Server: {e}"))
 
         threading.Thread(target=launcher_worker, daemon=True).start()
+
+    @staticmethod
+    def _find_python_interpreter() -> str:
+        """Finds a real Python interpreter when running standalone or dropped into onedir."""
+        if sys.executable and os.path.basename(sys.executable).lower() in ("python.exe", "pythonw.exe", "python3.exe", "python"):
+            return sys.executable
+        candidates = [
+            os.path.join(project_root, ".venv", "Scripts", "python.exe"),
+            os.path.join(project_root, "..", ".venv", "Scripts", "python.exe"),
+            os.path.join(project_root, "..", "..", ".venv", "Scripts", "python.exe"),
+            os.path.join(project_root, "..", "..", "..", ".venv", "Scripts", "python.exe"),
+            os.path.join(project_root, "..", "..", "..", "SerenityDev", ".venv", "Scripts", "python.exe"),
+        ]
+        for c in candidates:
+            if os.path.isfile(c):
+                return os.path.abspath(c)
+        import shutil
+        return shutil.which("python") or shutil.which("python3") or sys.executable
 
     # --- UI INITIALIZATION ---
     def _build_ui(self):
@@ -462,6 +491,8 @@ class CeciliaThroneDesktopApp:
         self.hist_text.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.hist_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._bind_targeted_mousewheel(self.hist_text, self.hist_text)
+        self._attach_text_context_menu(self.hist_text, read_only=True)
 
         # Tag configurations
         self.hist_text.tag_config("pc_badge", font=("Segoe UI", 9, "bold"), foreground=THEME["accent_mint"])
@@ -571,6 +602,10 @@ class CeciliaThroneDesktopApp:
                 user_text = item.get("user_input", "").strip()
                 thought = (item.get("thought_stream") or "").strip()
                 speech = (item.get("final_response") or "").strip()
+                raw_resp = (item.get("raw_response") or "").strip()
+
+                from brainuke_core.cognition.thought_isolation import ThoughtIsolation
+                clean_thought, clean_raw, clean_speech = ThoughtIsolation().isolate_stages(thought, speech, raw_resp)
 
                 w_disp = f"{weight:.2f}" if weight not in (1.0, 0.0) else f"{weight:.1f}"
                 if src == "pc":
@@ -591,14 +626,18 @@ class CeciliaThroneDesktopApp:
                     self.hist_text.insert(tk.END, "👤 Human User:\n", "hist_user_hdr")
                     self.hist_text.insert(tk.END, f"{user_text}\n\n", "hist_user_body")
 
-                if thought:
-                    self.hist_text.insert(tk.END, "▶ Internal Thought Stream:\n", "hist_thought_hdr")
-                    self.hist_text.insert(tk.END, f"{thought}\n\n", "hist_thought_body")
+                author_label = "⚡ Cecilia (PC Core Master):" if src == "pc" else "📱 Cecilia (Mobile Companion):"
+                self.hist_text.insert(tk.END, f"{author_label}\n", "hist_speech_hdr")
 
-                if speech:
-                    author_label = "⚡ Cecilia (PC Core Master):" if src == "pc" else "📱 Cecilia (Mobile Companion):"
-                    self.hist_text.insert(tk.END, f"{author_label}\n", "hist_speech_hdr")
-                    self.hist_text.insert(tk.END, f"{speech}\n\n", "hist_speech_body")
+                stage_comp = self._build_stage_drawer_component(
+                    parent_widget=self.hist_text,
+                    thought=clean_thought,
+                    raw_response=clean_raw,
+                    speech=clean_speech,
+                    is_streaming=False
+                )
+                self.hist_text.window_create(tk.END, window=stage_comp)
+                self.hist_text.insert(tk.END, "\n\n")
 
             elif kind == "dmn":
                 concept = item.get("concept_family", "general")
@@ -650,6 +689,8 @@ class CeciliaThroneDesktopApp:
         self.chat_text.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.chat_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._bind_targeted_mousewheel(self.chat_text, self.chat_text)
+        self._attach_text_context_menu(self.chat_text, read_only=True)
 
         # Define text tags for formatting
         self.chat_text.tag_config("user_header", font=("Segoe UI", 9, "bold"), foreground=THEME["accent_blue"])
@@ -685,6 +726,20 @@ class CeciliaThroneDesktopApp:
         btn_self_heal = tk.Button(actions_row, text="🩺 Self-Heal / Debug", command=self._open_self_heal_dialog, bg=THEME["btn_sec_bg"], fg=THEME["accent_mint"], font=(FONT_FAMILY, 8, "bold"), padx=12, pady=4, relief=tk.FLAT, activebackground=THEME["btn_hover"])
         btn_self_heal.pack(side=tk.LEFT, padx=(0, 8))
 
+        self.btn_flush_queue = tk.Button(
+            actions_row,
+            text="📥 Send Queue (0)",
+            command=self._on_manual_flush_queue,
+            bg=THEME["btn_sec_bg"],
+            fg=THEME["text_muted"],
+            font=(FONT_FAMILY, 8, "bold"),
+            padx=12,
+            pady=4,
+            relief=tk.FLAT,
+            activebackground=THEME["btn_hover"]
+        )
+        self.btn_flush_queue.pack(side=tk.LEFT, padx=(0, 8))
+
         btn_clear = tk.Button(actions_row, text="🧹 Clear View", command=self._on_clear_chat, bg=THEME["btn_sec_bg"], fg=THEME["text_muted"], font=("Segoe UI", 8), padx=12, pady=4, relief=tk.FLAT)
         btn_clear.pack(side=tk.RIGHT)
 
@@ -692,9 +747,36 @@ class CeciliaThroneDesktopApp:
         input_row = tk.Frame(composer_container, bg=THEME["bg_card"], highlightthickness=1, highlightbackground=THEME["border_card"])
         input_row.pack(side=tk.TOP, fill=tk.X)
 
-        self.entry_input = tk.Entry(input_row, bg=THEME["bg_input"], fg=THEME["text_main"], insertbackground=THEME["accent_mint"], font=("Segoe UI", 10), relief=tk.FLAT)
-        self.entry_input.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=12, pady=10)
-        self.entry_input.bind("<Return>", lambda e: self._on_send())
+        self.entry_input = tk.Text(
+            input_row,
+            bg=THEME["bg_input"],
+            fg=THEME["text_main"],
+            insertbackground=THEME["accent_mint"],
+            font=("Segoe UI", 10),
+            relief=tk.FLAT,
+            height=1,
+            wrap=tk.WORD,
+            undo=True,
+            padx=10,
+            pady=8
+        )
+        self.entry_input.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8, pady=6)
+
+        def _handle_return(e):
+            if not (e.state & 0x0001 or e.state & 0x0004):  # Neither Shift nor Ctrl
+                self._on_send()
+                return "break"
+            self.root.after_idle(self._adjust_input_height)
+            return None
+
+        self.entry_input.bind("<Return>", _handle_return)
+        self.entry_input.bind("<Shift-Return>", lambda e: self.root.after_idle(self._adjust_input_height))
+        self.entry_input.bind("<Control-Return>", lambda e: self.root.after_idle(self._adjust_input_height))
+        self.entry_input.bind("<KeyRelease>", lambda e: self._adjust_input_height())
+
+        # Targeted mousewheel scrolling on input box
+        self._bind_targeted_mousewheel(self.entry_input, self.entry_input)
+        self._attach_text_context_menu(self.entry_input, read_only=False)
 
         self.btn_send = tk.Button(input_row, text="Send", command=self._on_send, bg=THEME["btn_bg"], fg=THEME["btn_fg"], font=("Segoe UI", 9, "bold"), padx=16, pady=6, relief=tk.FLAT, activebackground=THEME["btn_hover"])
         self.btn_send.pack(side=tk.RIGHT, padx=8, pady=6)
@@ -716,6 +798,22 @@ class CeciliaThroneDesktopApp:
 
         self.lbl_sampling_info = tk.Label(card_diag, text="• Sampling: Temp=0.80, MinP=0.05, Ctx=32K", font=("Segoe UI", 8), fg=THEME["text_muted"], bg=THEME["bg_card"])
         self.lbl_sampling_info.pack(anchor="w", padx=14, pady=1)
+
+        # Real-time Hardware Telemetry (Option C: Dedicated VRAM, Shared VRAM, RAM)
+        self.lbl_telemetry_mem = tk.Label(card_diag, text="• Memory: VRAM -- | Shared -- | RAM --", font=("Segoe UI", 8), fg=THEME["text_muted"], bg=THEME["bg_card"])
+        self.lbl_telemetry_mem.pack(anchor="w", padx=14, pady=1)
+
+        # Performance: TTFT and streaming tokens/sec
+        self.lbl_telemetry_speed = tk.Label(card_diag, text="• Speed: TTFT: -- | -- t/s", font=("Segoe UI", 8), fg=THEME["text_muted"], bg=THEME["bg_card"])
+        self.lbl_telemetry_speed.pack(anchor="w", padx=14, pady=1)
+
+        # Context window utilization
+        self.lbl_telemetry_ctx = tk.Label(card_diag, text="• Context Window: 0 / 32K (0.0%)", font=("Segoe UI", 8), fg=THEME["text_muted"], bg=THEME["bg_card"])
+        self.lbl_telemetry_ctx.pack(anchor="w", padx=14, pady=1)
+
+        # Prompt queue status
+        self.lbl_diag_backlog = tk.Label(card_diag, text="• Prompt Queue: Idle (0 pending)", font=("Segoe UI", 8), fg=THEME["accent_mint"], bg=THEME["bg_card"])
+        self.lbl_diag_backlog.pack(anchor="w", padx=14, pady=1)
 
         self.lbl_diag_weight = tk.Label(card_diag, text="• Priority: PC Core Master (Weight 1.0 > Droid 0.35)", font=("Segoe UI", 8), fg=THEME["accent_blue"], bg=THEME["bg_card"])
         self.lbl_diag_weight.pack(anchor="w", padx=14, pady=1)
@@ -758,7 +856,192 @@ class CeciliaThroneDesktopApp:
 
 
     # --- CHAT & REASONING RENDERING ---
-    def _append_message(self, author: str, thought: str = "", speech: str = "", is_model: bool = False):
+    def _build_stage_drawer_component(
+        self,
+        parent_widget,
+        thought: str = "",
+        raw_response: str = "",
+        speech: str = "",
+        is_streaming: bool = False
+    ) -> tk.Frame:
+        """
+        Constructs unified 3-stage drawer component with side-by-side buttons:
+        [ Stage 1: Thoughts ] [ Stage 2: Raw Response ] [ Stage 3: Refined Response ]
+        Flow:
+        - Dropdown buttons left-to-right: thoughts, raw response, refined response.
+        - Text / drawer content top-to-bottom: thoughts, raw response, refined response.
+        - Dual-line titles for space and scaling clarity.
+        - Targeted mousewheel scrolling bound strictly to parent_widget.
+        """
+        container = tk.Frame(parent_widget, bg=THEME["bg_card"], padx=2, pady=2)
+
+        # Button Row: Side-by-side buttons [ 1 - 2 - 3 ] (left to right)
+        btn_bar = tk.Frame(container, bg=THEME["bg_card"])
+        btn_bar.pack(side=tk.TOP, fill=tk.X, anchor="w", pady=(0, 4))
+
+        has_thought = bool(thought and thought.strip())
+        has_raw = bool(raw_response and raw_response.strip())
+        has_speech = bool(speech and speech.strip())
+
+        thought_open = [False]
+        raw_open = [False]
+        speech_open = [True]
+
+        # Stage 1: Thought Drawer
+        box_thought = tk.Frame(
+            container,
+            bg=THEME["thought_bg"],
+            highlightthickness=1,
+            highlightbackground=THEME["border_card"],
+            padx=10,
+            pady=8
+        )
+        lbl_thought = tk.Label(
+            box_thought,
+            text=thought.strip() if has_thought else "(Reasoning process)",
+            font=("Consolas", 9, "italic"),
+            fg=THEME["accent_thought"],
+            bg=THEME["thought_bg"],
+            justify=tk.LEFT,
+            wraplength=660,
+            anchor="w"
+        )
+        lbl_thought.pack(fill=tk.X, expand=True)
+
+        # Stage 2: Raw Response Drawer (Darkened background, slight green tint)
+        box_raw = tk.Frame(
+            container,
+            bg="#06140D",
+            highlightthickness=1,
+            highlightbackground="#103F29",
+            padx=10,
+            pady=8
+        )
+        badge_raw = tk.Label(
+            box_raw,
+            text="⚡ [STAGE 2 • RAW UNFILTERED RESPONSE]",
+            font=("Segoe UI", 8, "bold"),
+            fg="#6EE7B7",
+            bg="#06140D",
+            anchor="w"
+        )
+        badge_raw.pack(anchor="w", pady=(0, 4))
+        lbl_raw = tk.Label(
+            box_raw,
+            text=raw_response.strip() if has_raw else "",
+            font=("Segoe UI", 9),
+            fg="#A7F3D0",
+            bg="#06140D",
+            justify=tk.LEFT,
+            wraplength=660,
+            anchor="w"
+        )
+        lbl_raw.pack(fill=tk.X, expand=True)
+
+        # Stage 3: Refined Response Speech Block
+        box_speech = tk.Frame(
+            container,
+            bg=THEME["bg_card"]
+        )
+        lbl_speech = tk.Label(
+            box_speech,
+            text=speech.strip() if has_speech else "",
+            font=("Segoe UI", 10),
+            fg=THEME["text_main"],
+            bg=THEME["bg_card"],
+            justify=tk.LEFT,
+            wraplength=660,
+            anchor="w"
+        )
+        lbl_speech.pack(fill=tk.X, expand=True, pady=(2, 2))
+
+        # Enforce strict top-to-bottom layout: Stage 1 (Thoughts) -> Stage 2 (Raw Response) -> Stage 3 (Refined Response)
+        def _repack_boxes():
+            box_thought.pack_forget()
+            box_raw.pack_forget()
+            box_speech.pack_forget()
+            if thought_open[0]:
+                box_thought.pack(side=tk.TOP, fill=tk.X, expand=True, pady=(4, 2))
+            if raw_open[0]:
+                box_raw.pack(side=tk.TOP, fill=tk.X, expand=True, pady=(4, 2))
+            if speech_open[0]:
+                box_speech.pack(side=tk.TOP, fill=tk.X, expand=True, pady=(2, 2))
+
+        # Toggles with dual-line titles (does not force-scroll to bottom on click)
+        def _toggle_thought():
+            thought_open[0] = not thought_open[0]
+            btn_thought.config(text="▼ Stage 1\nThoughts" if thought_open[0] else "▶ Stage 1\nThoughts")
+            _repack_boxes()
+
+        def _toggle_raw():
+            raw_open[0] = not raw_open[0]
+            btn_raw.config(text="▼ Stage 2\nRaw Response" if raw_open[0] else "▶ Stage 2\nRaw Response")
+            _repack_boxes()
+
+        def _toggle_speech():
+            speech_open[0] = not speech_open[0]
+            btn_speech.config(text="▼ Stage 3\nRefined Response" if speech_open[0] else "▶ Stage 3\nRefined Response")
+            _repack_boxes()
+
+        btn_thought = tk.Button(
+            btn_bar,
+            text="▶ Stage 1\nThoughts",
+            justify=tk.CENTER,
+            font=("Segoe UI", 8, "bold"),
+            fg=THEME["accent_thought"],
+            bg=THEME["bg_card_subtle"],
+            activebackground=THEME["bg_card"],
+            activeforeground=THEME["accent_mint"],
+            relief=tk.FLAT, padx=8, pady=3, cursor="hand2",
+            command=_toggle_thought
+        )
+        btn_raw = tk.Button(
+            btn_bar,
+            text="▶ Stage 2\nRaw Response",
+            justify=tk.CENTER,
+            font=("Segoe UI", 8, "bold"),
+            fg="#6EE7B7",
+            bg="#081B13",
+            activebackground="#0E2F21",
+            activeforeground="#A7F3D0",
+            relief=tk.FLAT, padx=8, pady=3, cursor="hand2",
+            command=_toggle_raw
+        )
+        btn_speech = tk.Button(
+            btn_bar,
+            text="▼ Stage 3\nRefined Response",
+            justify=tk.CENTER,
+            font=("Segoe UI", 8, "bold"),
+            fg=THEME["accent_mint"],
+            bg=THEME["bg_card_subtle"],
+            activebackground=THEME["bg_card"],
+            activeforeground=THEME["accent_mint"],
+            relief=tk.FLAT, padx=8, pady=3, cursor="hand2",
+            command=_toggle_speech
+        )
+
+        # Pack buttons side-by-side in left-to-right order: 1 (Thoughts) -> 2 (Raw Response) -> 3 (Refined Response)
+        if has_thought:
+            btn_thought.pack(side=tk.LEFT, padx=(0, 6))
+        if has_raw:
+            btn_raw.pack(side=tk.LEFT, padx=(0, 6))
+        if has_speech:
+            btn_speech.pack(side=tk.LEFT, padx=(0, 6))
+
+        # Initially pack open boxes strictly in top-to-bottom order
+        _repack_boxes()
+
+        # Targeted mousewheel bindings so scrolling strictly moves parent_widget
+        for w in (
+            container, btn_bar, btn_thought, btn_raw, btn_speech,
+            box_thought, lbl_thought, box_raw, badge_raw, lbl_raw,
+            box_speech, lbl_speech
+        ):
+            self._bind_targeted_mousewheel(w, parent_widget)
+
+        return container
+
+    def _append_message(self, author: str, thought: str = "", raw_response: str = "", speech: str = "", is_model: bool = False):
         self.chat_text.config(state=tk.NORMAL)
 
         if not is_model:
@@ -766,82 +1049,72 @@ class CeciliaThroneDesktopApp:
             self.chat_text.insert(tk.END, f"👤 {author}\n", "user_header")
             self.chat_text.insert(tk.END, f"{speech.strip()}\n\n", "user_body")
         else:
-            # Model Turn with Strict Reasoning Isolation
+            # Model Turn with Strict Reasoning & Raw Response Isolation
             self.chat_text.insert(tk.END, f"{author}\n", "model_header")
 
-            # Thought Drawer (Always inside a collapsible dropdown drawer)
-            cleaned_thought = thought.strip() if thought else ""
-            if cleaned_thought:
-                drawer_frame = tk.Frame(self.chat_text, bg=THEME["bg_card"], padx=2, pady=2)
+            from brainuke_core.cognition.thought_isolation import ThoughtIsolation
+            clean_thought, clean_raw, clean_speech = ThoughtIsolation().isolate_stages(thought, speech, raw_response)
 
-                content_box = tk.Frame(drawer_frame, bg=THEME["thought_bg"], highlightthickness=1, highlightbackground=THEME["border_card"], padx=10, pady=8)
-                lbl_content = tk.Label(
-                    content_box,
-                    text=cleaned_thought,
-                    font=("Consolas", 9, "italic"),
-                    fg=THEME["accent_thought"],
-                    bg=THEME["thought_bg"],
-                    justify=tk.LEFT,
-                    wraplength=660,
-                    anchor="w"
-                )
-                lbl_content.pack(fill=tk.X, expand=True)
-
-                is_open = [False]
-                def _make_toggle(b, box, st):
-                    def _toggle():
-                        if st[0]:
-                            box.pack_forget()
-                            b.config(text="▶ Internal Reasoning (click to expand)")
-                            st[0] = False
-                        else:
-                            box.pack(fill=tk.X, expand=True, pady=(4, 2))
-                            b.config(text="▼ Internal Reasoning (click to collapse)")
-                            st[0] = True
-                        self.chat_text.see(tk.END)
-                    return _toggle
-
-                btn_toggle = tk.Button(
-                    drawer_frame,
-                    text="▶ Internal Reasoning (click to expand)",
-                    font=("Segoe UI", 8, "bold"),
-                    fg=THEME["accent_thought"],
-                    bg=THEME["bg_card_subtle"],
-                    activebackground=THEME["bg_card"],
-                    activeforeground=THEME["accent_mint"],
-                    relief=tk.FLAT,
-                    padx=8,
-                    pady=2,
-                    cursor="hand2"
-                )
-                btn_toggle.config(command=_make_toggle(btn_toggle, content_box, is_open))
-                btn_toggle.pack(anchor="w")
-
-                self.chat_text.window_create(tk.END, window=drawer_frame)
-                self.chat_text.insert(tk.END, "\n")
-
-            # Spoken Text
-            if speech:
-                self.chat_text.insert(tk.END, f"{speech.strip()}\n\n", "model_speech")
+            stage_comp = self._build_stage_drawer_component(
+                parent_widget=self.chat_text,
+                thought=clean_thought,
+                raw_response=clean_raw,
+                speech=clean_speech,
+                is_streaming=False
+            )
+            self.chat_text.window_create(tk.END, window=stage_comp)
+            self.chat_text.insert(tk.END, "\n\n")
 
         self.chat_text.insert(tk.END, "\n", "spacer")
         self.chat_text.config(state=tk.DISABLED)
         self.chat_text.see(tk.END)
 
+    def _repack_streaming_boxes(self):
+        """Ensures strict top-to-bottom layout: Stage 1 (Thoughts) -> Stage 2 (Raw Response) -> Stage 3 (Refined Response)."""
+        if not hasattr(self, "streaming_drawer_frame") or not self.streaming_drawer_frame:
+            return
+        if hasattr(self, "streaming_box_thought") and self.streaming_box_thought:
+            self.streaming_box_thought.pack_forget()
+        if hasattr(self, "streaming_box_raw") and self.streaming_box_raw:
+            self.streaming_box_raw.pack_forget()
+        if hasattr(self, "streaming_box_speech") and self.streaming_box_speech:
+            self.streaming_box_speech.pack_forget()
+
+        if hasattr(self, "streaming_box_thought") and self.streaming_box_thought and self.streaming_thought_open[0]:
+            self.streaming_box_thought.pack(side=tk.TOP, fill=tk.X, expand=True, pady=(4, 2))
+        if hasattr(self, "streaming_box_raw") and self.streaming_box_raw and self.streaming_raw_open[0]:
+            self.streaming_box_raw.pack(side=tk.TOP, fill=tk.X, expand=True, pady=(4, 2))
+        if hasattr(self, "streaming_box_speech") and self.streaming_box_speech and self.streaming_speech_open[0]:
+            self.streaming_box_speech.pack(side=tk.TOP, fill=tk.X, expand=True, pady=(2, 2))
+
     def _init_streaming_turn(self):
-        """Initializes a live streaming turn with active reasoning drawer and speech insertion mark."""
+        """Initializes a live streaming turn with 3-stage pipeline drawers (Thoughts > Raw Response > Refined Response)."""
         if self.is_streaming:
             return
         self.is_streaming = True
+        self.streaming_stage = 1
         self.streaming_thought_text = ""
-        self.streaming_speech_started = False
+        self.streaming_raw_text = ""
+        self.streaming_speech_text = ""
+        self._in_deconstruct_stream = False
+        self._in_raw_stream = False
 
         self.chat_text.config(state=tk.NORMAL)
         self.chat_text.insert(tk.END, "⚡ Cecilia • Core Persona\n", "model_header")
 
-        # Collapsible Thought Drawer
+        # Create container frame embedded in chat_text
         self.streaming_drawer_frame = tk.Frame(self.chat_text, bg=THEME["bg_card"], padx=2, pady=2)
-        self.streaming_content_box = tk.Frame(
+
+        # Horizontal buttons bar for side-by-side dropdown triggers [ 1 - 2 - 3 ] (left to right)
+        self.streaming_btn_bar = tk.Frame(self.streaming_drawer_frame, bg=THEME["bg_card"])
+        self.streaming_btn_bar.pack(side=tk.TOP, fill=tk.X, anchor="w", pady=(0, 4))
+
+        self.streaming_thought_open = [True]
+        self.streaming_raw_open = [False]
+        self.streaming_speech_open = [False]
+
+        # Stage 1: Thought Drawer
+        self.streaming_box_thought = tk.Frame(
             self.streaming_drawer_frame,
             bg=THEME["thought_bg"],
             highlightthickness=1,
@@ -850,7 +1123,7 @@ class CeciliaThroneDesktopApp:
             pady=8
         )
         self.streaming_thought_lbl = tk.Label(
-            self.streaming_content_box,
+            self.streaming_box_thought,
             text="Reflecting in the shadows...",
             font=("Consolas", 9, "italic"),
             fg=THEME["accent_thought"],
@@ -861,119 +1134,515 @@ class CeciliaThroneDesktopApp:
         )
         self.streaming_thought_lbl.pack(fill=tk.X, expand=True)
 
-        is_open = [False]
-        def _make_toggle(b, box, st):
-            def _toggle():
-                if st[0]:
-                    box.pack_forget()
-                    b.config(text="▶ Internal Reasoning (click to expand)")
-                    st[0] = False
-                else:
-                    box.pack(fill=tk.X, expand=True, pady=(4, 2))
-                    b.config(text="▼ Internal Reasoning (click to collapse)")
-                    st[0] = True
-                self.chat_text.see(tk.END)
-            return _toggle
-
-        btn_toggle = tk.Button(
+        # Stage 2: Raw Response Drawer (Darkened background, slight green tint)
+        self.streaming_box_raw = tk.Frame(
             self.streaming_drawer_frame,
-            text="▶ Internal Reasoning (click to expand)",
+            bg="#06140D",
+            highlightthickness=1,
+            highlightbackground="#103F29",
+            padx=10,
+            pady=8
+        )
+        self.streaming_raw_badge = tk.Label(
+            self.streaming_box_raw,
+            text="⚡ [STAGE 2 • RAW UNFILTERED RESPONSE]",
+            font=("Segoe UI", 8, "bold"),
+            fg="#6EE7B7",
+            bg="#06140D",
+            anchor="w"
+        )
+        self.streaming_raw_badge.pack(anchor="w", pady=(0, 4))
+        self.streaming_raw_lbl = tk.Label(
+            self.streaming_box_raw,
+            text="",
+            font=("Segoe UI", 9),
+            fg="#A7F3D0",
+            bg="#06140D",
+            justify=tk.LEFT,
+            wraplength=660,
+            anchor="w"
+        )
+        self.streaming_raw_lbl.pack(fill=tk.X, expand=True)
+
+        # Stage 3: Refined Response Speech Block
+        self.streaming_box_speech = tk.Frame(
+            self.streaming_drawer_frame,
+            bg=THEME["bg_card"]
+        )
+        self.streaming_speech_lbl = tk.Label(
+            self.streaming_box_speech,
+            text="",
+            font=("Segoe UI", 10),
+            fg=THEME["text_main"],
+            bg=THEME["bg_card"],
+            justify=tk.LEFT,
+            wraplength=660,
+            anchor="w"
+        )
+        self.streaming_speech_lbl.pack(fill=tk.X, expand=True, pady=(2, 2))
+
+        # Button toggles with dual-line titles (preserves user scroll position)
+        def _toggle_thought():
+            self.streaming_thought_open[0] = not self.streaming_thought_open[0]
+            self.streaming_btn_thought.config(
+                text="▼ Stage 1\nThoughts" if self.streaming_thought_open[0] else "▶ Stage 1\nThoughts"
+            )
+            self._repack_streaming_boxes()
+
+        def _toggle_raw():
+            self.streaming_raw_open[0] = not self.streaming_raw_open[0]
+            self.streaming_btn_raw.config(
+                text="▼ Stage 2\nRaw Response" if self.streaming_raw_open[0] else "▶ Stage 2\nRaw Response"
+            )
+            self._repack_streaming_boxes()
+
+        def _toggle_speech():
+            self.streaming_speech_open[0] = not self.streaming_speech_open[0]
+            self.streaming_btn_speech.config(
+                text="▼ Stage 3\nRefined Response" if self.streaming_speech_open[0] else "▶ Stage 3\nRefined Response"
+            )
+            self._repack_streaming_boxes()
+
+        self.streaming_btn_thought = tk.Button(
+            self.streaming_btn_bar,
+            text="▼ Stage 1\nThoughts",
+            justify=tk.CENTER,
             font=("Segoe UI", 8, "bold"),
             fg=THEME["accent_thought"],
             bg=THEME["bg_card_subtle"],
             activebackground=THEME["bg_card"],
             activeforeground=THEME["accent_mint"],
-            relief=tk.FLAT,
-            padx=8,
-            pady=2,
-            cursor="hand2"
+            relief=tk.FLAT, padx=8, pady=3, cursor="hand2",
+            command=_toggle_thought
         )
-        btn_toggle.config(command=_make_toggle(btn_toggle, self.streaming_content_box, is_open))
-        btn_toggle.pack(anchor="w")
+        self.streaming_btn_raw = tk.Button(
+            self.streaming_btn_bar,
+            text="▶ Stage 2\nRaw Response",
+            justify=tk.CENTER,
+            font=("Segoe UI", 8, "bold"),
+            fg="#6EE7B7",
+            bg="#081B13",
+            activebackground="#0E2F21",
+            activeforeground="#A7F3D0",
+            relief=tk.FLAT, padx=8, pady=3, cursor="hand2",
+            command=_toggle_raw
+        )
+        self.streaming_btn_speech = tk.Button(
+            self.streaming_btn_bar,
+            text="▶ Stage 3\nRefined Response",
+            justify=tk.CENTER,
+            font=("Segoe UI", 8, "bold"),
+            fg=THEME["accent_mint"],
+            bg=THEME["bg_card_subtle"],
+            activebackground=THEME["bg_card"],
+            activeforeground=THEME["accent_mint"],
+            relief=tk.FLAT, padx=8, pady=3, cursor="hand2",
+            command=_toggle_speech
+        )
+
+        # Side-by-side button stacking [ 1 - 2 - 3 ] (left to right)
+        self.streaming_btn_thought.pack(side=tk.LEFT, padx=(0, 6))
+        self.streaming_btn_raw.pack(side=tk.LEFT, padx=(0, 6))
+        self.streaming_btn_speech.pack(side=tk.LEFT, padx=(0, 6))
+
+        # Initial top-to-bottom layout
+        self._repack_streaming_boxes()
+
+        for w in (
+            self.streaming_drawer_frame, self.streaming_btn_bar,
+            self.streaming_btn_thought, self.streaming_btn_raw, self.streaming_btn_speech,
+            self.streaming_box_thought, self.streaming_thought_lbl,
+            self.streaming_box_raw, self.streaming_raw_badge, self.streaming_raw_lbl,
+            self.streaming_box_speech, self.streaming_speech_lbl
+        ):
+            self._bind_targeted_mousewheel(w, self.chat_text)
 
         self.chat_text.window_create(tk.END, window=self.streaming_drawer_frame)
         self.chat_text.insert(tk.END, "\n")
-        self.chat_text.mark_set("speech_stream_insert", tk.END)
-        self.chat_text.mark_gravity("speech_stream_insert", tk.RIGHT)
         self.chat_text.config(state=tk.DISABLED)
         self.chat_text.see(tk.END)
 
     def _append_thought_chunk(self, chunk: str):
-        """Streams a token chunk into the active reasoning drawer."""
+        """Streams a token chunk into the active reasoning drawer (Stage 1)."""
         if not self.is_streaming:
             self._init_streaming_turn()
         self.streaming_thought_text += chunk
         if self.streaming_thought_lbl:
-            self.streaming_thought_lbl.config(text=self.streaming_thought_text.strip())
+            disp = re.sub(r'<\|thought\|>|</?thought>|</?think>|<\|channel>thought|<channel\|>|</?channel:thought>|</?channel>|<start_of_turn>|<end_of_turn>', '', self.streaming_thought_text).strip()
+            self.streaming_thought_lbl.config(text=disp or "Reflecting in the shadows...")
+        self.chat_text.see(tk.END)
 
-    def _append_speech_chunk(self, chunk: str):
-        """Streams a spoken token chunk live into the active chat speech block."""
+    def _append_raw_chunk(self, chunk: str):
+        """Streams token chunk into Stage 2 (Raw Response), auto-closing Stage 1 (Thoughts)."""
         if not self.is_streaming:
             self._init_streaming_turn()
 
-        # Guard: If chunk contains reasoning/deconstruction markers, divert to thought drawer
+        if self.streaming_stage < 2:
+            # Auto-minimize Stage 1 (Thoughts)
+            self.streaming_thought_open[0] = False
+            if hasattr(self, "streaming_btn_thought") and self.streaming_btn_thought:
+                self.streaming_btn_thought.config(text="▶ Stage 1\nThoughts")
+            # Auto-open Stage 2 (Raw Response)
+            self.streaming_raw_open[0] = True
+            if hasattr(self, "streaming_btn_raw") and self.streaming_btn_raw:
+                self.streaming_btn_raw.config(text="▼ Stage 2\nRaw Response")
+            self.streaming_stage = 2
+            self._repack_streaming_boxes()
+
+        clean_raw = re.sub(r'^(?:\*\*\s*)?\[\s*(?:STAGE\s*2(?::\s*RAW\s*(?:UNFILTERED\s*)?RESPONSE)?|TACTICAL_ANALYSIS_COMPLETE|STATUS:\s*UNFILTERED)\s*\](?:\s*\*\*)?', '', chunk, flags=re.IGNORECASE)
+        self.streaming_raw_text += clean_raw
+        if self.streaming_raw_lbl:
+            self.streaming_raw_lbl.config(text=self.streaming_raw_text.strip())
+        self.chat_text.see(tk.END)
+
+    def _append_speech_chunk(self, chunk: str):
+        """
+        Streams incoming tokens into the 3-stage pipeline:
+        Stage 1: Thoughts -> Stage 2: Raw Response -> Stage 3: Refined Response.
+        Auto-minimizes previous stage upon transition.
+        """
+        if not self.is_streaming:
+            self._init_streaming_turn()
+
         deconstruct_markers = (
             "[DECONSTRUCTION", "[MOTIVE", "[SUBTEXT", "[STRATEGIC IMPLICATIONS",
-            "[REASONING ENGINE", "[ANALYSIS_START", "<|thought|>", "<thought>", "<think>"
+            "[REASONING ENGINE", "[ANALYSIS_START", "<|thought|>", "<thought>", "<think>",
+            "<|channel>thought", "<channel:thought>", "<channel>thought", "<|channel|>thought"
         )
+        raw_markers = (
+            "[STAGE 2", "STAGE 2:", "STAGE 2 •",
+            "[TACTICAL_ANALYSIS_COMPLETE", "[STATUS: UNFILTERED", "[STATUS:",
+            "[TACTICAL_ANALYSIS", "[UNFILTERED", "[RAW_RESPONSE", "[PRELIMINARY_ANALYSIS",
+            "[DUAL_RESPONSE", "[UNFILTERED_OUTPUT", "[SYSTEM ANALYSIS", "[STRATEGIC",
+            "[TECHNICAL SUMMARY", "[ARCHITECTURAL", "[SYSTEM", "**[SYSTEM", "**[STRATEGIC",
+            "** SYSTEM ANALYSIS", "** STRATEGIC"
+        )
+        speech_markers = (
+            "[STAGE 3", "STAGE 3:", "STAGE 3 •",
+            "⚡ CECILIA", "CECILIA:", "[PERSONA", "[SPEECH", "[REFINED_RESPONSE", "[AUTHENTIC_VOICE",
+            "**[STAGE 3"
+        )
+
         upper_chunk = chunk.upper()
+
+        # Route to Stage 1 (Thoughts) if reasoning/channel tags active
         if getattr(self, "_in_deconstruct_stream", False) or any(m in upper_chunk for m in deconstruct_markers):
             self._in_deconstruct_stream = True
-            # Divert to reasoning drawer
             self._append_thought_chunk(chunk)
-            if any(m in upper_chunk for m in ("</|THOUGHT|>", "</THOUGHT>", "</THINK>", "[ANALYSIS_END]")):
+            if any(m in upper_chunk for m in ("</|THOUGHT|>", "</THOUGHT>", "</THINK>", "[ANALYSIS_END]", "<CHANNEL|>", "</CHANNEL>")):
                 self._in_deconstruct_stream = False
             return
 
-        self.streaming_speech_started = True
-        self.chat_text.config(state=tk.NORMAL)
-        self.chat_text.insert("speech_stream_insert", chunk, "model_speech")
-        self.chat_text.config(state=tk.DISABLED)
-        self.chat_text.see(tk.END)
+        # Route to Stage 2 (Raw Response) if tactical/unfiltered tags active
+        if getattr(self, "_in_raw_stream", False) or any(m in upper_chunk for m in raw_markers):
+            if any(sm in upper_chunk for sm in speech_markers):
+                self._in_raw_stream = False
+                # Transitions into Stage 3 below
+                chunk = re.sub(r'^(?:\*\*\s*)?\[\s*(?:STAGE\s*3(?::\s*REFINED\s*RESPONSE)?|PERSONA|SPEECH|REFINED_RESPONSE|AUTHENTIC_VOICE|CECILIA)\s*\](?:\s*\*\*)?', '', chunk, flags=re.IGNORECASE)
+            else:
+                self._in_raw_stream = True
+                self._append_raw_chunk(chunk)
+                return
 
-    def _finalize_streaming_turn(self, final_thought: str = "", final_speech: str = ""):
-        """Finalizes the live stream turn when interact completion is returned."""
+        # STAGE 3: Refined Persona Speech
+        if self.streaming_stage < 3:
+            # Auto-minimize Stage 2 (Raw Response)
+            self.streaming_raw_open[0] = False
+            if hasattr(self, "streaming_btn_raw") and self.streaming_btn_raw:
+                self.streaming_btn_raw.config(text="▶ Stage 2\nRaw Response")
+            # Auto-minimize Stage 1 (Thoughts)
+            self.streaming_thought_open[0] = False
+            if hasattr(self, "streaming_btn_thought") and self.streaming_btn_thought:
+                self.streaming_btn_thought.config(text="▶ Stage 1\nThoughts")
+
+            # Auto-open Stage 3 (Refined Response)
+            self.streaming_speech_open[0] = True
+            if hasattr(self, "streaming_btn_speech") and self.streaming_btn_speech:
+                self.streaming_btn_speech.config(text="▼ Stage 3\nRefined Response")
+            self.streaming_stage = 3
+            self._repack_streaming_boxes()
+
+        clean_c = re.sub(r'^(?:\*\*\s*)?\[\s*(?:STAGE\s*3(?::\s*REFINED\s*RESPONSE)?|PERSONA|SPEECH|REFINED_RESPONSE|AUTHENTIC_VOICE|CECILIA)\s*\](?:\s*\*\*)?', '', chunk, flags=re.IGNORECASE)
+        clean_c = re.sub(r'<\|thought\|>|</?thought>|</?think>|<turn\|>|<end_of_turn>|<\|turn>[a-z_]*\n?|<\|channel>thought|<channel\|>', '', clean_c)
+        if clean_c:
+            self.streaming_speech_text += clean_c
+            if self.streaming_speech_lbl:
+                self.streaming_speech_lbl.config(text=self.streaming_speech_text.strip())
+            self.chat_text.see(tk.END)
+
+    def _finalize_streaming_turn(self, final_thought: str = "", final_speech: str = "", final_raw: str = ""):
+        """Finalizes live stream turn with 3-stage isolation and clean interactive display."""
         from brainuke_core.cognition.thought_isolation import ThoughtIsolation
-        clean_thought, clean_speech = ThoughtIsolation().isolate(final_thought, final_speech)
+        clean_thought, clean_raw, clean_speech = ThoughtIsolation().isolate_stages(
+            raw_thought=final_thought or self.streaming_thought_text,
+            raw_speech=final_speech or self.streaming_speech_text,
+            raw_response=final_raw or self.streaming_raw_text
+        )
 
         if not self.is_streaming:
             self._append_message(
                 author="⚡ Cecilia • Core Persona",
                 thought=clean_thought,
+                raw_response=clean_raw,
                 speech=clean_speech,
                 is_model=True
             )
             return
 
-        if not self.streaming_speech_started and clean_speech:
-            self.chat_text.config(state=tk.NORMAL)
-            self.chat_text.insert("speech_stream_insert", clean_speech.strip(), "model_speech")
-            self.chat_text.config(state=tk.DISABLED)
+        # Update thought
+        if self.streaming_thought_lbl:
+            self.streaming_thought_lbl.config(text=clean_thought or "(Reasoning complete)")
+        if not clean_thought:
+            self.streaming_btn_thought.pack_forget()
+            self.streaming_thought_open[0] = False
 
-        if clean_thought and self.streaming_thought_lbl:
-            self.streaming_thought_lbl.config(text=clean_thought.strip())
+        # Update raw response
+        if clean_raw:
+            self.streaming_raw_lbl.config(text=clean_raw)
+            if not self.streaming_btn_raw.winfo_ismapped():
+                # Packing order 1 (thought) -> 2 (raw) -> 3 (speech)
+                if self.streaming_btn_speech.winfo_ismapped():
+                    self.streaming_btn_raw.pack(side=tk.LEFT, padx=(0, 6), before=self.streaming_btn_speech)
+                else:
+                    self.streaming_btn_raw.pack(side=tk.LEFT, padx=(0, 6))
+            # Normal response closes raw by default after stream
+            self.streaming_raw_open[0] = False
+            self.streaming_btn_raw.config(text="▶ Stage 2\nRaw Response")
+        else:
+            self.streaming_btn_raw.pack_forget()
+            self.streaming_raw_open[0] = False
+
+        # Update refined speech
+        if self.streaming_speech_lbl:
+            self.streaming_speech_lbl.config(text=clean_speech)
+        if clean_speech:
+            self.streaming_speech_open[0] = True
+            self.streaming_btn_speech.config(text="▼ Stage 3\nRefined Response")
+            if not self.streaming_btn_speech.winfo_ismapped():
+                self.streaming_btn_speech.pack(side=tk.LEFT, padx=(0, 6))
+        else:
+            self.streaming_btn_speech.pack_forget()
+            self.streaming_speech_open[0] = False
+
+        self._repack_streaming_boxes()
 
         self.chat_text.config(state=tk.NORMAL)
-        self.chat_text.insert(tk.END, "\n\n", "spacer")
+        self.chat_text.insert(tk.END, "\n", "spacer")
         self.chat_text.config(state=tk.DISABLED)
         self.chat_text.see(tk.END)
 
         self.is_streaming = False
+        self.streaming_stage = 1
         self.streaming_thought_lbl = None
+        self.streaming_raw_lbl = None
+        self.streaming_speech_lbl = None
         self.streaming_thought_text = ""
-        self.streaming_speech_started = False
+        self.streaming_raw_text = ""
+        self.streaming_speech_text = ""
         self._in_deconstruct_stream = False
+        self._in_raw_stream = False
+
+        self._update_telemetry_ui()
+
+        # If backlog has items and model is ready, auto-advance next queue item
+        if self.pending_prompt_backlog and self.model_status_data.get("online", False) and not getattr(self, "_backlog_flush_scheduled", False):
+            self._backlog_flush_scheduled = True
+            self.root.after(1500, self._flush_pending_backlog)
 
     # --- ACTIONS & LOGIC ---
+    def _adjust_input_height(self):
+        """Dynamically adjusts multi-line input box height between 1 and 5 lines."""
+        try:
+            content = self.entry_input.get("1.0", "end-1c")
+            if not content:
+                self.entry_input.config(height=1)
+                return
+            lines = content.count("\n") + 1
+            clamped = max(1, min(lines, 5))
+            current = int(self.entry_input.cget("height"))
+            if current != clamped:
+                self.entry_input.config(height=clamped)
+        except Exception:
+            pass
+
+    def _bind_targeted_mousewheel(self, widget, target_scrollable):
+        """Binds targeted mousewheel scrolling so scrolling strictly moves target_scrollable and never bubbles to other windows."""
+        def _on_wheel(event):
+            try:
+                if target_scrollable.winfo_exists():
+                    delta = int(-1 * (event.delta / 120)) if event.delta else 0
+                    if delta != 0:
+                        target_scrollable.yview_scroll(delta, "units")
+            except Exception:
+                pass
+            return "break"
+
+        def _on_enter(e):
+            try:
+                widget.bind_all("<MouseWheel>", _on_wheel)
+            except Exception:
+                pass
+
+        def _on_leave(e):
+            try:
+                widget.unbind_all("<MouseWheel>")
+            except Exception:
+                pass
+
+        widget.bind("<Enter>", _on_enter, add="+")
+        widget.bind("<Leave>", _on_leave, add="+")
+
+    def _attach_text_context_menu(self, widget, read_only: bool = False):
+        """
+        Attaches right-click context menu (Copy, Select All, Cut, Paste)
+        and guarantees Ctrl+C and Ctrl+A work reliably across platforms even if disabled.
+        """
+        try:
+            widget.configure(exportselection=False)
+        except Exception:
+            pass
+
+        def _get_selection():
+            try:
+                if isinstance(widget, tk.Text):
+                    return widget.get(tk.SEL_FIRST, tk.SEL_LAST)
+                else:
+                    return widget.selection_get()
+            except tk.TclError:
+                return ""
+
+        def _do_copy(e=None):
+            selected = _get_selection()
+            if selected:
+                try:
+                    self.root.clipboard_clear()
+                    self.root.clipboard_append(selected)
+                except Exception:
+                    pass
+            return "break"
+
+        def _do_select_all(e=None):
+            try:
+                if isinstance(widget, tk.Text):
+                    widget.tag_add(tk.SEL, "1.0", "end-1c")
+                    widget.mark_set(tk.INSERT, "1.0")
+                    widget.see(tk.INSERT)
+                else:
+                    widget.selection_range(0, tk.END)
+                    widget.icursor(tk.END)
+            except Exception:
+                pass
+            return "break"
+
+        def _do_cut(e=None):
+            if read_only:
+                return "break"
+            selected = _get_selection()
+            if selected:
+                try:
+                    self.root.clipboard_clear()
+                    self.root.clipboard_append(selected)
+                    if isinstance(widget, tk.Text):
+                        widget.delete(tk.SEL_FIRST, tk.SEL_LAST)
+                    else:
+                        widget.delete(tk.SEL_FIRST, tk.SEL_LAST)
+                except Exception:
+                    pass
+            return "break"
+
+        def _do_paste(e=None):
+            if read_only:
+                return "break"
+            try:
+                clip = self.root.clipboard_get()
+                if clip:
+                    try:
+                        if isinstance(widget, tk.Text):
+                            if widget.tag_ranges(tk.SEL):
+                                widget.delete(tk.SEL_FIRST, tk.SEL_LAST)
+                            widget.insert(tk.INSERT, clip)
+                        else:
+                            try:
+                                widget.delete(tk.SEL_FIRST, tk.SEL_LAST)
+                            except tk.TclError:
+                                pass
+                            widget.insert(tk.INSERT, clip)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            return "break"
+
+        menu = tk.Menu(widget, tearoff=0, bg=THEME["bg_card"], fg=THEME["text_main"],
+                       activebackground=THEME["btn_hover"], activeforeground=THEME["btn_fg"],
+                       relief=tk.FLAT, bd=1)
+        menu.add_command(label="📋 Copy", accelerator="Ctrl+C", command=_do_copy)
+        if not read_only:
+            menu.add_command(label="✂️ Cut", accelerator="Ctrl+X", command=_do_cut)
+            menu.add_command(label="📥 Paste", accelerator="Ctrl+V", command=_do_paste)
+        menu.add_separator()
+        menu.add_command(label="📑 Select All", accelerator="Ctrl+A", command=_do_select_all)
+
+        def _show_context_menu(event):
+            widget.focus_set()
+            try:
+                if not read_only and isinstance(widget, tk.Text):
+                    if not widget.tag_ranges(tk.SEL):
+                        widget.mark_set(tk.INSERT, f"@{event.x},{event.y}")
+                menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                menu.grab_release()
+            return "break"
+
+        widget.bind("<Button-3>", _show_context_menu)
+        widget.bind("<Control-c>", _do_copy)
+        widget.bind("<Control-C>", _do_copy)
+        widget.bind("<Control-a>", _do_select_all)
+        widget.bind("<Control-A>", _do_select_all)
+        if not read_only:
+            widget.bind("<Control-x>", _do_cut)
+            widget.bind("<Control-X>", _do_cut)
+            widget.bind("<Control-v>", _do_paste)
+            widget.bind("<Control-V>", _do_paste)
+
     def _on_send(self):
-        text = self.entry_input.get().strip()
+        text = self.entry_input.get("1.0", tk.END).strip()
         if not text:
             return
-        self.entry_input.delete(0, tk.END)
+        self.entry_input.delete("1.0", tk.END)
+        self._adjust_input_height()
 
-        # Append user turn
+        # Append user turn to visual stage
         self._append_message("Human User", speech=text, is_model=False)
 
+        # Prompt queue check: If model is offline or initializing, buffer into queue!
+        if not self.model_status_data.get("online", False):
+            self.pending_prompt_backlog.append(text)
+            pending_count = len(self.pending_prompt_backlog)
+            self._append_notice(
+                f"⏳ PC llama-server is offline / initializing. Prompt queued in unfinished backlog ({pending_count} pending).\n"
+                f"Cecilia will automatically receive and process this turn as soon as the model loads."
+            )
+            if hasattr(self, "lbl_diag_backlog"):
+                self.lbl_diag_backlog.config(
+                    text=f"• Prompt Queue: {pending_count} pending ⏳",
+                    fg=THEME["accent_gold"]
+                )
+            def _buffer_server():
+                try:
+                    q_req = urllib.request.Request(
+                        f"{self.base_url}/api/v1/queue/buffer",
+                        data=json.dumps({"prompt": text, "reason": "model_offline"}).encode("utf-8"),
+                        headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.token}"}
+                    )
+                    with urllib.request.urlopen(q_req, context=self.ssl_context, timeout=4):
+                        pass
+                except Exception:
+                    pass
+            threading.Thread(target=_buffer_server, daemon=True).start()
+            return
+
+        self._last_dispatched_prompt = text
         # Initialize live streaming turn immediately for zero perceived latency
         self._init_streaming_turn()
 
@@ -992,12 +1661,16 @@ class CeciliaThroneDesktopApp:
             }
         )
         try:
-            with urllib.request.urlopen(req, context=self.ssl_context, timeout=120) as resp:
+            with urllib.request.urlopen(req, context=self.ssl_context, timeout=180) as resp:
                 result = json.loads(resp.read().decode())
                 self.event_queue.put(("interact_result", result))
         except urllib.error.HTTPError as e:
-            self.event_queue.put(("interact_error", f"HTTP {e.code}: {e.reason}"))
+            if text and text not in self.pending_prompt_backlog:
+                self.pending_prompt_backlog.insert(0, text)
+            self.event_queue.put(("interact_error", f"HTTP {e.code}: {e.reason} (Prompt preserved in backlog)"))
         except Exception as e:
+            if text and text not in self.pending_prompt_backlog:
+                self.pending_prompt_backlog.insert(0, text)
             if "10061" in str(e):
                 self.event_queue.put(("error", "Throne Server offline (Port 8443). Auto-starting background server..."))
                 self._ensure_throne_server_running()
@@ -1135,16 +1808,52 @@ class CeciliaThroneDesktopApp:
             try:
                 event_type, data = self.event_queue.get_nowait()
                 if event_type == "interact_result":
-                    self._finalize_streaming_turn(
-                        final_thought=data.get("thought", ""),
-                        final_speech=data.get("response", "")
+                    final_thought = data.get("thought", "")
+                    final_speech = data.get("response", "")
+                    final_raw = data.get("raw_response", "")
+
+                    # Detect if runner failed or was offline during inference
+                    is_offline = (
+                        "[Diagnostic] PC llama-server (port 8081) is offline or initializing" in final_thought
+                        and not final_speech.strip()
                     )
+                    if is_offline or data.get("buffered", False):
+                        orig_prompt = getattr(self, "_last_dispatched_prompt", "")
+                        if orig_prompt and orig_prompt not in self.pending_prompt_backlog:
+                            self.pending_prompt_backlog.append(orig_prompt)
+                            if hasattr(self, "lbl_diag_backlog"):
+                                self.lbl_diag_backlog.config(
+                                    text=f"• Prompt Queue: {len(self.pending_prompt_backlog)} pending ⏳",
+                                    fg=THEME["accent_gold"]
+                                )
+                            self._append_notice(f"⏳ Prompt held in backlog ({len(self.pending_prompt_backlog)} pending). Auto-executing once model is loaded.")
+
+                    self._finalize_streaming_turn(
+                        final_thought=final_thought,
+                        final_speech=final_speech,
+                        final_raw=final_raw
+                    )
+
+                    if data.get("telemetry"):
+                        self.last_stream_telemetry = data["telemetry"]
+                    if data.get("context_metrics"):
+                        self.last_context_metrics = data["context_metrics"]
+                    self._update_telemetry_ui()
+
                     if getattr(self, "active_tab", "") == "history":
                         self._fetch_history_async()
+
+                    # Auto-flush next queued prompt if model is online
+                    if self.model_status_data.get("online", False) and self.pending_prompt_backlog:
+                        if not getattr(self, "_backlog_flush_scheduled", False):
+                            self._backlog_flush_scheduled = True
+                            self.root.after(1000, self._flush_pending_backlog)
                 elif event_type == "history_data":
                     self._render_history_feed(data)
                 elif event_type == "thought_chunk":
                     self._append_thought_chunk(data)
+                elif event_type == "raw_chunk":
+                    self._append_raw_chunk(data)
                 elif event_type == "speech_chunk":
                     self._append_speech_chunk(data)
                 elif event_type == "downlink_status":
@@ -1163,6 +1872,19 @@ class CeciliaThroneDesktopApp:
                     self.streaming_speech_started = False
                     self._in_deconstruct_stream = False
                     self._append_notice(f"⚠️ {data}")
+                elif event_type == "flush_backlog":
+                    self._flush_pending_backlog()
+                elif event_type == "synced_backlog":
+                    for p in data:
+                        if p not in self.pending_prompt_backlog:
+                            self.pending_prompt_backlog.append(p)
+                    if hasattr(self, "lbl_diag_backlog") and self.pending_prompt_backlog:
+                        self.lbl_diag_backlog.config(
+                            text=f"• Prompt Queue: {len(self.pending_prompt_backlog)} pending ⏳",
+                            fg=THEME["accent_gold"]
+                        )
+                    if self.model_status_data.get("online", False) and self.pending_prompt_backlog:
+                        self.root.after(300, self._flush_pending_backlog)
                 elif event_type == "threads":
                     self._update_threads_list(data)
                 elif event_type == "status_update":
@@ -1244,8 +1966,12 @@ class CeciliaThroneDesktopApp:
             pass
         elif ev_type == "thought_chunk":
             self.event_queue.put(("thought_chunk", content))
+        elif ev_type == "raw_chunk":
+            self.event_queue.put(("raw_chunk", content))
         elif ev_type == "speech_chunk":
             self.event_queue.put(("speech_chunk", content))
+        elif ev_type == "raw_response":
+            pass
         elif ev_type == "thought":
             pass
         elif ev_type == "speech":
@@ -1301,9 +2027,23 @@ class CeciliaThroneDesktopApp:
                 else:
                     self.lbl_simmer.config(text="• DMN Simmer: Idle", fg=THEME["text_muted"])
 
+        if data.get("hardware"):
+            self.last_hardware_telemetry = data["hardware"]
+        if data.get("telemetry"):
+            self.last_stream_telemetry = data["telemetry"]
+        if data.get("context_metrics"):
+            self.last_context_metrics = data["context_metrics"]
+        server_pending = data.get("queue_pending_count", 0)
+        if server_pending > 0 and not self.pending_prompt_backlog:
+            self._sync_pending_from_server()
+        self._update_telemetry_ui()
+
     def _update_model_telemetry(self, data: dict):
         self.model_status_data = data
+        was_online = getattr(self, "last_runner_was_online", False)
         is_online = data.get("online", False)
+        self.last_runner_was_online = is_online
+
         alias = data.get("active_alias", "normal")
         active_model = data.get("active_model", "")
         inf = data.get("inference_settings", {})
@@ -1349,6 +2089,163 @@ class CeciliaThroneDesktopApp:
         self.lbl_sampling_info.config(
             text=f"• Sampling: Temp={temp:.2f}, MinP={min_p:.2f}, Ctx={ctx_k}"
         )
+
+        if data.get("hardware"):
+            self.last_hardware_telemetry = data["hardware"]
+        if data.get("telemetry"):
+            self.last_stream_telemetry = data["telemetry"]
+        if data.get("context_metrics"):
+            self.last_context_metrics = data["context_metrics"]
+        self._update_telemetry_ui()
+
+        # If model just loaded or is online and backlog has items, flush backlog after a settling delay!
+        if is_online and (not was_online or len(self.pending_prompt_backlog) > 0):
+            if self.pending_prompt_backlog and not getattr(self, "_backlog_flush_scheduled", False):
+                self._backlog_flush_scheduled = True
+                # Safe 1500ms delay to ensure model weights, slots, and KV cache are fully settled in memory
+                self.root.after(1500, self._flush_pending_backlog)
+
+    def _on_manual_flush_queue(self):
+        """Manual trigger button above prompt box to dispatch pending prompts from queue."""
+        self._sync_pending_from_server()
+        if not self.pending_prompt_backlog:
+            self._append_notice("📥 Prompt Queue is currently empty. No pending prompts to dispatch.")
+            return
+
+        if not self.model_status_data.get("online", False):
+            self._append_notice("⚠️ Cannot send queue: Model is currently offline. Starting or waiting for model load...")
+            return
+
+        self._flush_pending_backlog()
+
+    def _flush_pending_backlog(self):
+        """Flushes unfinished prompts to model only after model is fully loaded in memory."""
+        self._backlog_flush_scheduled = False
+        if not self.model_status_data.get("online", False) or self.model_status_data.get("status") != "loaded":
+            return
+        if getattr(self, "is_streaming", False):
+            # Model is currently streaming; wait for turn completion before next prompt
+            self._backlog_flush_scheduled = True
+            self.root.after(1500, self._flush_pending_backlog)
+            return
+        if not self.pending_prompt_backlog:
+            if hasattr(self, "lbl_diag_backlog"):
+                self.lbl_diag_backlog.config(text="• Prompt Queue: Idle (0 pending)", fg=THEME["accent_mint"])
+            return
+
+        next_prompt = self.pending_prompt_backlog.pop(0)
+        remaining = len(self.pending_prompt_backlog)
+        if hasattr(self, "btn_flush_queue") and self.btn_flush_queue:
+            self.btn_flush_queue.config(
+                text=f"📥 Send Queue ({remaining})",
+                fg=THEME["accent_gold"] if remaining > 0 else THEME["text_muted"]
+            )
+        if hasattr(self, "lbl_diag_backlog"):
+            lbl_txt = f"• Prompt Queue: {remaining} pending ⏳" if remaining > 0 else "• Prompt Queue: Flushing..."
+            self.lbl_diag_backlog.config(text=lbl_txt, fg=THEME["accent_gold"] if remaining > 0 else THEME["accent_mint"])
+
+        self._append_notice(f"⚡ Model ready! Presenting unfinished prompt from queue to Cecilia:\n\"{next_prompt}\"")
+        self._last_dispatched_prompt = next_prompt
+        self._init_streaming_turn()
+        threading.Thread(target=self._send_interact_request, args=(next_prompt,), daemon=True).start()
+
+        # Notify server queue to mark flushed
+        def flush_server():
+            try:
+                f_req = urllib.request.Request(
+                    f"{self.base_url}/api/v1/queue/flush",
+                    data=b"{}",
+                    headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.token}"}
+                )
+                with urllib.request.urlopen(f_req, context=self.ssl_context, timeout=4):
+                    pass
+            except Exception:
+                pass
+        threading.Thread(target=flush_server, daemon=True).start()
+
+    def _sync_pending_from_server(self):
+        def task():
+            try:
+                q_req = urllib.request.Request(
+                    f"{self.base_url}/api/v1/queue/pending",
+                    headers={"Authorization": f"Bearer {self.token}"}
+                )
+                with urllib.request.urlopen(q_req, context=self.ssl_context, timeout=3) as resp:
+                    res = json.loads(resp.read().decode())
+                    pending_list = [p["prompt_text"] for p in res.get("pending", []) if p.get("prompt_text")]
+                    if pending_list:
+                        self.event_queue.put(("synced_backlog", pending_list))
+            except Exception:
+                pass
+        threading.Thread(target=task, daemon=True).start()
+
+    def _update_telemetry_ui(self):
+        if not hasattr(self, "lbl_telemetry_mem"):
+            return
+
+        # 1. Memory: Dedicated VRAM, Shared VRAM, System RAM
+        hw = getattr(self, "last_hardware_telemetry", {})
+        ram = hw.get("ram", {})
+        vram_d = hw.get("vram_dedicated", {})
+        vram_s = hw.get("vram_shared", {})
+
+        ram_txt = f"{ram.get('used_mb', 0)/1024:.1f}/{ram.get('total_mb', 0)/1024:.1f}G" if ram.get("total_mb") else "--"
+        vram_txt = f"{vram_d.get('used_mb', 0)/1024:.1f}/{vram_d.get('total_mb', 0)/1024:.1f}G" if vram_d.get("total_mb") else "--"
+        shared_txt = f"{vram_s.get('used_mb', 0)/1024:.1f}G" if vram_s.get("used_mb") is not None else "--"
+
+        self.lbl_telemetry_mem.config(
+            text=f"• Memory: VRAM {vram_txt} | Shared {shared_txt} | RAM {ram_txt}",
+            fg=THEME["accent_mint"] if vram_d.get("total_mb") else THEME["text_muted"]
+        )
+
+        # 2. Performance: TTFT and streaming tokens/sec
+        telem = getattr(self, "last_stream_telemetry", {})
+        ttft = telem.get("ttft_ms")
+        tps = telem.get("tokens_per_sec")
+        ttft_str = f"{ttft}ms" if ttft is not None else "--"
+        tps_str = f"{tps:.1f} t/s" if tps is not None else "--"
+        self.lbl_telemetry_speed.config(
+            text=f"• Speed: TTFT: {ttft_str} | {tps_str}",
+            fg=THEME["accent_blue"] if ttft is not None else THEME["text_muted"]
+        )
+
+        # 3. Context Window Utilization
+        ctx = getattr(self, "last_context_metrics", {})
+        total_tokens = ctx.get("total_tokens", 0)
+        ctx_limit = ctx.get("context_window", 32768)
+        ctx_pct = ctx.get("context_pct", 0.0)
+        sys_tokens = ctx.get("system_tokens", 0)
+        user_tokens = ctx.get("user_tokens", 0)
+        hist_tokens = ctx.get("history_tokens", 0)
+        if total_tokens > 0:
+            self.lbl_telemetry_ctx.config(
+                text=f"• Context: {total_tokens:,} / {ctx_limit:,} ({ctx_pct:.1f}%) [S:{sys_tokens} H:{hist_tokens} U:{user_tokens}]",
+                fg=THEME["accent_mint"] if ctx_pct < 80 else THEME["status_offline"]
+            )
+        else:
+            ctx_k = f"{ctx_limit // 1024}K" if ctx_limit >= 1024 else str(ctx_limit)
+            self.lbl_telemetry_ctx.config(
+                text=f"• Context Window: 0 / {ctx_k} (0.0%)",
+                fg=THEME["text_muted"]
+            )
+
+        # 4. Prompt Queue / Backlog
+        pending = len(getattr(self, "pending_prompt_backlog", []))
+        if hasattr(self, "btn_flush_queue") and self.btn_flush_queue:
+            self.btn_flush_queue.config(
+                text=f"📥 Send Queue ({pending})",
+                fg=THEME["accent_gold"] if pending > 0 else THEME["text_muted"]
+            )
+        if pending > 0:
+            self.lbl_diag_backlog.config(
+                text=f"• Prompt Queue: {pending} pending ⏳",
+                fg=THEME["accent_gold"]
+            )
+        else:
+            self.lbl_diag_backlog.config(
+                text="• Prompt Queue: Idle (0 pending)",
+                fg=THEME["accent_mint"]
+            )
 
     def _on_toggle_model(self):
         current_alias = self.model_status_data.get("active_alias", "normal")
@@ -1436,6 +2333,7 @@ class CeciliaThroneDesktopApp:
                         if st_data.get("online", False):
                             self.event_queue.put(("model_status_update", st_data))
                             self.event_queue.put(("notice", "PC Core Model online & ready on Port 8081 🟢"))
+                            self.event_queue.put(("flush_backlog", None))
                             return
                 except Exception:
                     pass
@@ -1508,16 +2406,99 @@ class CeciliaThroneDesktopApp:
         )
         rb_secret.pack(anchor="w", padx=16, pady=2)
 
-        path_label = tk.Label(
-            card_model,
-            text=f"Active Path: {self.model_status_data.get('active_path', 'unknown')}",
-            font=("Segoe UI", 8),
+        # GGUF Path & File Picker
+        path_var = tk.StringVar(value=self.model_status_data.get('active_path', ''))
+
+        path_row = tk.Frame(card_model, bg=THEME["bg_card"])
+        path_row.pack(fill=tk.X, padx=16, pady=(4, 6))
+
+        tk.Label(
+            path_row,
+            text="GGUF Path:",
+            font=("Segoe UI", 8, "bold"),
             fg=THEME["text_muted"],
             bg=THEME["bg_card"],
-            wraplength=480,
-            justify=tk.LEFT
+            width=10,
+            anchor="w"
+        ).pack(side=tk.LEFT)
+
+        entry_path = tk.Entry(
+            path_row,
+            textvariable=path_var,
+            font=("Segoe UI", 8),
+            bg=THEME["bg_input"],
+            fg=THEME["text_main"],
+            relief=tk.FLAT
         )
-        path_label.pack(anchor="w", padx=16, pady=(4, 10))
+        entry_path.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+
+        def browse_gguf():
+            cur = path_var.get()
+            init_dir = os.path.dirname(cur) if cur and os.path.isdir(os.path.dirname(cur)) else project_root
+            chosen = filedialog.askopenfilename(
+                title="Select GGUF Model Core",
+                initialdir=init_dir,
+                filetypes=[("GGUF Models", "*.gguf"), ("All Files", "*.*")],
+                parent=dlg
+            )
+            if chosen:
+                path_var.set(os.path.abspath(chosen))
+
+        btn_browse = tk.Button(
+            path_row,
+            text="📁 Browse...",
+            command=browse_gguf,
+            bg=THEME["btn_sec_bg"],
+            fg=THEME["accent_mint"],
+            font=("Segoe UI", 8, "bold"),
+            padx=8,
+            pady=2,
+            relief=tk.FLAT
+        )
+        btn_browse.pack(side=tk.RIGHT)
+
+        # Discovered / Fallback Models Dropdown
+        disc_models = self.model_status_data.get("discovered_models", [])
+        if disc_models:
+            disc_row = tk.Frame(card_model, bg=THEME["bg_card"])
+            disc_row.pack(fill=tk.X, padx=16, pady=(0, 10))
+
+            tk.Label(
+                disc_row,
+                text="Discovered:",
+                font=("Segoe UI", 8),
+                fg=THEME["text_muted"],
+                bg=THEME["bg_card"],
+                width=10,
+                anchor="w"
+            ).pack(side=tk.LEFT)
+
+            disc_options = [f"{m['name']} ({m.get('size_mb', 0)} MB)" for m in disc_models]
+            disc_map = {opt: m["path"] for opt, m in zip(disc_options, disc_models)}
+            disc_var = tk.StringVar(value="Select discovered fallback model...")
+
+            def on_disc_select(evt=None):
+                val = disc_var.get()
+                if val in disc_map:
+                    path_var.set(disc_map[val])
+
+            cb_disc = ttk.Combobox(
+                disc_row,
+                textvariable=disc_var,
+                values=disc_options,
+                state="readonly"
+            )
+            cb_disc.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            cb_disc.bind("<<ComboboxSelected>>", on_disc_select)
+        else:
+            path_label = tk.Label(
+                card_model,
+                text="No additional .gguf files discovered in workspace or onedir Models/ folders.",
+                font=("Segoe UI", 8, "italic"),
+                fg=THEME["text_muted"],
+                bg=THEME["bg_card"]
+            )
+            path_label.pack(anchor="w", padx=16, pady=(0, 8))
 
         # 2. Runner & Load Status Card
         card_runner = tk.Frame(container, bg=THEME["bg_card"], highlightthickness=1, highlightbackground=THEME["border_card"])
@@ -1655,7 +2636,21 @@ class CeciliaThroneDesktopApp:
             }
 
             def task():
-                # 1. Select model
+                # 1. Update custom GGUF path if set or changed
+                new_path = path_var.get().strip()
+                if new_path and new_path != self.model_status_data.get('active_path'):
+                    try:
+                        req_path = urllib.request.Request(
+                            f"{self.base_url}/api/v1/models/path",
+                            data=json.dumps({"path": new_path}).encode("utf-8"),
+                            headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.token}"}
+                        )
+                        urllib.request.urlopen(req_path, context=self.ssl_context, timeout=10)
+                        self.event_queue.put(("notice", f"Model path updated: {os.path.basename(new_path)}"))
+                    except Exception as e:
+                        self.event_queue.put(("error", f"Model path save failed: {e}"))
+
+                # 2. Select model alias
                 try:
                     req_sel = urllib.request.Request(
                         f"{self.base_url}/api/v1/models/select",
@@ -1726,6 +2721,14 @@ class CeciliaThroneDesktopApp:
         threading.Thread(target=task, daemon=True).start()
 
     def _refresh_status_loop(self):
+        # Direct local hardware telemetry update (works even if Throne server is offline)
+        try:
+            from brainuke_core.telemetry.hardware import get_all_hardware_telemetry
+            self.last_hardware_telemetry = get_all_hardware_telemetry()
+            self._update_telemetry_ui()
+        except Exception:
+            pass
+
         def task():
             url = f"{self.base_url}/api/v1/cognitive/status"
             req = urllib.request.Request(
@@ -1741,7 +2744,7 @@ class CeciliaThroneDesktopApp:
 
         threading.Thread(target=task, daemon=True).start()
         self._fetch_model_status_async()
-        self.root.after(4000, self._refresh_status_loop)
+        self.root.after(3000, self._refresh_status_loop)
 
     def _open_self_heal_dialog(self):
         dlg = tk.Toplevel(self.root)
@@ -1835,6 +2838,7 @@ class CeciliaThroneDesktopApp:
 
         details_text = tk.Text(card_errors, height=5, bg=THEME["bg_void"], fg=THEME["text_muted"], font=("Consolas", 8), relief=tk.FLAT, padx=8, pady=6)
         details_text.pack(fill=tk.BOTH, expand=True, padx=12, pady=(4, 6))
+        self._attach_text_context_menu(details_text, read_only=True)
 
         diag_btn_row = tk.Frame(card_errors, bg=THEME["bg_card"])
         diag_btn_row.pack(fill=tk.X, padx=12, pady=(0, 8))
@@ -1848,6 +2852,7 @@ class CeciliaThroneDesktopApp:
 
         patch_text = tk.Text(patch_box_frame, height=4, bg=THEME["thought_bg"], fg=THEME["accent_thought"], font=("Consolas", 8), relief=tk.FLAT, padx=8, pady=4)
         patch_text.pack(fill=tk.X, padx=12, pady=4)
+        self._attach_text_context_menu(patch_text, read_only=True)
 
         patch_btn_row = tk.Frame(patch_box_frame, bg=THEME["bg_card"])
         patch_btn_row.pack(fill=tk.X, padx=12, pady=(0, 6))
@@ -1985,7 +2990,40 @@ class CeciliaThroneDesktopApp:
         load_self_heal_data()
 
     def close(self):
+        """Unified Shutdown: shuts down runner, stops server, and cleans up UI."""
         self.sse_active = False
+
+        # 1. Instruct Throne Server to stop llama-server runner and drop model
+        try:
+            req = urllib.request.Request(
+                f"{self.base_url}/api/v1/models/stop",
+                data=b"{}",
+                headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.token}"}
+            )
+            with urllib.request.urlopen(req, context=self.ssl_context, timeout=2.5):
+                pass
+        except Exception:
+            pass
+
+        # 2. Direct fallback cleanup via PCRunnerManager and port freeing
+        try:
+            from brainuke_core.cognition.runner_manager import PCRunnerManager
+            PCRunnerManager().stop_runner()
+        except Exception:
+            pass
+
+        # 3. Terminate background server process if spawned by this UI instance
+        if self.server_proc is not None and self.server_proc.poll() is None:
+            try:
+                self.server_proc.terminate()
+                self.server_proc.wait(timeout=2)
+            except Exception:
+                try:
+                    self.server_proc.kill()
+                except Exception:
+                    pass
+            self.server_proc = None
+
         self.root.destroy()
 
 
