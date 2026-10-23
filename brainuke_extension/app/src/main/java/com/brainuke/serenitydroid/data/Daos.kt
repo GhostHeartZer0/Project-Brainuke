@@ -34,6 +34,12 @@ interface MemoryNodeDao {
 
     @Query("SELECT MAX(timestamp) FROM memory_nodes")
     suspend fun getLatestTimestamp(): Long?
+
+    @Query("SELECT MAX(serverInsightId) FROM memory_nodes")
+    suspend fun getLatestServerInsightId(): Long?
+
+    @Query("SELECT * FROM memory_nodes ORDER BY timestamp DESC LIMIT :limit")
+    suspend fun getRecentNodes(limit: Int = 10): List<MemoryNodeEntity>
 }
 
 @Dao
@@ -55,4 +61,31 @@ interface ConversationDao {
 
     @Query("SELECT * FROM conversation_turns ORDER BY timestamp DESC LIMIT :limit")
     suspend fun getRecentTurns(limit: Int = 20): List<ConversationEntity>
+
+    @Query("SELECT MAX(serverTurnId) FROM conversation_turns WHERE sourceDevice = 'pc'")
+    suspend fun getLatestServerTurnId(): Long?
+}
+
+@Dao
+interface FailedPromptDao {
+    @Insert
+    suspend fun insert(prompt: FailedPromptEntity): Long
+
+    @Query("SELECT * FROM failed_prompt_buffer WHERE status = 'pending' ORDER BY timestamp ASC")
+    suspend fun getPendingPrompts(): List<FailedPromptEntity>
+
+    @Query("UPDATE failed_prompt_buffer SET status = :status WHERE id = :id")
+    suspend fun updateStatus(id: Long, status: String)
+
+    @Query("UPDATE failed_prompt_buffer SET retryCount = retryCount + 1, failureReason = :reason WHERE id = :id")
+    suspend fun recordRetry(id: Long, reason: String)
+
+    @Query("DELETE FROM failed_prompt_buffer WHERE status = 'flushed' AND timestamp < :olderThanEpochMs")
+    suspend fun pruneFlushed(olderThanEpochMs: Long)
+
+    @Query("SELECT COUNT(*) FROM failed_prompt_buffer WHERE status = 'pending'")
+    fun observePendingCount(): Flow<Int>
+
+    @Query("SELECT COUNT(*) FROM failed_prompt_buffer WHERE status = 'pending'")
+    suspend fun getPendingCount(): Int
 }

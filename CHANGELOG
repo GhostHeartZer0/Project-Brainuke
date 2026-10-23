@@ -1,5 +1,230 @@
 # CHANGELOG
 
+## [0.8.9] - 2026-10-23
+
+- `brainuke_core/cognition/runner_manager.py` & `brainuke_throne/server/main.py`:
+  - Fixed uncontrolled path injection in `set_custom_model_path()` and `POST /api/v1/models/path`: validated `.gguf` extension and resolved path with `.is_file()` boundary checks before accessing filesystem.
+  - Fixed exception and stack trace information exposure in `initiate_load()` and `POST /api/v1/models/load`: sanitized error return values into generic responses and status 500 exceptions, preventing internal stack traces from leaking to API callers.
+
+- `SerenityPC Legacy v1.8.0` Onedir Distro (`dist\SerenityPC Legacy v1.8.0`):
+  - Created standalone bundled `.venv` in distro root with `cryptography`, `fastapi`, and `uvicorn`.
+  - Enables `Project Brainuke` (`start_ui.bat` / `start_throne.bat`) to run out-of-the-box when dropped into onedir folder on systems without Python installed.
+- `brainuke_throne/server/main.py`:
+  - Added missing `import os` used in `run_throne()` path resolution.
+- `Environment M` (Dual-Environment Nemotron 3.5 Bolt Inference Runtime):
+  - Created standalone isolated environment directory `C:\Users\ccrg6\Desktop\Hub\Serenities\Environment M`.
+  - Provisioned Python 3.14 venv mirroring SerenityPC dependencies with upstream `llama.cpp` PR #30520 (`e64207bab`).
+  - Compiled and installed `llama-cpp-python` 0.3.36 with native CUDA `sm_86` acceleration (`-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=86`).
+  - Successfully verified native loading and context initialization for `S:\Downloads\NVIDIA-Nemotron-3.5-Bolt-74B-A9B-UD-IQ2_XXS.gguf` without metadata errors.
+  - Updated `SerenityPC.spec`: removed `Legacy` tag naming (`SerenityPC v{version}`), added `COLLECT` block with `exclude_binaries=True` for `--onedir` distribution directory layout generation.
+- `brainuke_throne` & `brainuke_core` (PyInstaller `--onedir` & Standalone Interoperability):
+  - `start_ui.bat` & `start_throne.bat`: Added candidate Python interpreter discovery hierarchy (local `.venv`, onedir parent `.venv`, SerenityPC repo `.venv`, SerenityDev `.venv`, system PATH) and quoted execution, allowing execution without global Python PATH.
+  - `start_ui.ps1` & `start_throne.ps1`: Added PowerShell candidate resolution for Python interpreter across local, onedir parent, and SerenityPC root `.venv` directories.
+  - `start_llama_server.bat`: Added fallback discovery for `llama-server.exe` from onedir `Tools\llama-dist\` and `temp_zip\` directories, and model path discovery from onedir `Models\` folders.
+  - `brainuke_throne/ui_desktop/cecilia_ui.py`: Added `_find_python_interpreter()` so background auto-launch of `brainuke_throne/server/main.py` detects real Python interpreters instead of blindly passing `sys.executable` (preventing accidental re-launch of frozen `SerenityPC.exe`).
+  - `brainuke_throne/server/main.py`: Anchored TLS certificate, private key, and root CA paths to `project_root` absolute paths in `run_throne()`, preventing working-directory drift failures when launched from onedir layouts.
+  - `brainuke_throne/tls/provisioner.py`: Anchored default certificate and CA file arguments to `PROJECT_ROOT` across `TLSProvisioner.ensure_root_ca_and_cert` and `CADownloaderServer.start`.
+  - `brainuke_core/cognition/runner_manager.py`:
+    - Added `scan_available_models()`: scans workspace and onedir `Models/` candidate directories recursively for valid `.gguf` files.
+    - Updated `resolve_model_path()`: automatically falls back to the first available `.gguf` found on disk if configured and preset model paths are missing.
+    - Added `set_custom_model_path(model_path, model_id)`: dynamically re-binds active model slot to any valid custom GGUF.
+    - Exposed `discovered_models` in `get_status()`.
+  - `brainuke_throne/server/main.py`:
+    - Added `GET /api/v1/models/scan`: returns all discovered local `.gguf` files with metadata.
+    - Added `POST /api/v1/models/path`: validates and binds custom GGUF path on the fly.
+  - `brainuke_throne/ui_desktop/cecilia_ui.py`:
+    - Added GGUF file browser (`📁 Browse...` via `filedialog.askopenfilename`) to Model Settings Dialog.
+    - Added dynamic dropdown populated with discovered fallback models, auto-updating active path on selection.
+    - Integrated path persistence into `Save & Apply` flow calling `/api/v1/models/path`.
+  - `tests/test_model_manager.py`:
+    - Added `test_scan_available_models_and_auto_fallback` and `test_set_custom_model_path` (13/13 passing).
+
+## [0.8.8] - 2026-10-01
+
+- `brainuke_throne/ui_desktop/cecilia_ui.py` (Desktop Clipboard & Context Menu):
+  - Added `_attach_text_context_menu(widget, read_only)` with `exportselection=False`, explicit `<Control-c>`/`<Control-a>` bindings, and custom-styled right-click context menu (`📋 Copy`, `✂️ Cut`, `📥 Paste`, `📑 Select All`).
+  - Attached to `chat_text`, `hist_text`, `entry_input`, `details_text`, and `patch_text`, resolving text copying failures on disabled scrollable text widgets.
+- `brainuke_core` & `brainuke_throne` (PC Memory Integrity & Thematic Grounding):
+  - `brainuke_core/memory/vault.py`:
+    - Fixed `get_recent_interactions` and `get_random_interactions` to select `turn_uuid`, ensuring deduplication keys are preserved on retrieved dialogue turns.
+    - Added `search_memory(query, limit, max_recent)`: searches across all time with priority given to simmered DMN insights (`importance_weight DESC`), retrieves recent interaction turns, and fetches historical dialogue turns matching keywords across all time.
+    - Fixed SQLite expression tree overflow (`maximum depth 1000`) on large prompts by deduplicating and capping search tokens to 12 distinct keywords with exception-guarded queries.
+    - Added `get_grounding_for_prompt(user_input, limit)`: retrieves relevant simmered thoughts matching prompt keywords across all time, falling back to recent DMN worldview anchors to ensure continuity without amnesia loops.
+  - `brainuke_throne/server/main.py`:
+    - Enhanced `/api/v1/sync/pull` to accept query params dynamically in non-FastAPI mock calls (`since_turn_id`, `since_insight_id`, `since`).
+    - Validated 4-step symmetrical sync (`push` -> `simmer` -> `pull` -> `status`) with idempotent `turn_uuid` deduplication and high-water mark suppression in `tests/test_sync_and_weighting.py`.
+  - `brainuke_core/cognition/llama_client.py`:
+    - Hardened `is_healthy()` to verify JSON status is `"ok"` (preventing dispatch while model weights are loading with HTTP 503).
+    - Increased default HTTP client timeout from 60.0s to 180.0s to prevent `The read operation timed out` during deep multi-stage inferences.
+  - `brainuke_core/cognition/simmer_bus.py`:
+    - Implemented Live Volition Proactive Hook (Plan C Hybrid): broadcasts structured `volition_trigger` event over SSE Downlink via `status_fn` when `salience_score >= 0.85` with topic, insight, vital state, and proactive prompt payload.
+    - Guarded `_distill_history` in `trigger_simmer_cycle` with `try/except Exception` to handle `TimeoutError` gracefully and fall back to clean synthesis insight when llama-server is busy.
+    - Wrapped `start_simmer_loop` background monitor in `try/except Exception` to eliminate `Task exception was never retrieved` unhandled crashes.
+- `brainuke_extension` (Android Mobile Reflex Volition Hook):
+  - `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/model/BrainukeModels.kt`:
+    - Added `BrainukeEvent.VolitionTrigger(salience, topic, insight, isVital, proactivePrompt)` and parser in `BrainukeEvent.fromJson`.
+  - `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/service/SensoryService.kt`:
+    - Connected downlink handler for `BrainukeEvent.VolitionTrigger` to log and dispatch proactive user notification.
+    - Enhanced `handleIdleVolitionTick` to evaluate mobile reflex volition on notable ambient telemetry shifts (lighting lux shift > 50, power state change), firing local reflex volition trigger.
+  - `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/MainActivity.kt`:
+    - Added `observeDownlink` UI handler displaying proactive volition insight notes and prompt cues in active dialogue views.
+- `brainuke_core` & `brainuke_throne` (PC Memory Integrity & Thematic Grounding):
+    - Implemented Plan C Structural Dependency: added direct delimiter splitting on `[STAGE 3: REFINED RESPONSE]` patterns, cleanly dividing Stage 2 (Raw Analysis) from Stage 3 (Refined Persona Speech).
+    - Tightened parser regex to strictly distinguish formatting (italics prose `*word*`, quotes `"..."`, conversational terms like `darling`, `tell me,`) from structure (bullet lists `^\s*[*•\-]\s+`, ordered lists `^\s*\d+\.\s+`), preventing analytical sections from swallowing novelistic dialogue.
+    - Added comprehensive unit tests in `tests/test_thought_isolation.py` validating Plan C structural splitting and italic dialogue protection.
+  - `brainuke_core/cognition/orchestrator.py`:
+    - Enforced Plan C `[STRUCTURAL SPECIFICATION]` in `final_prompt`, commanding the model to output a single-pass structured cognitive data object with explicit consecutive stages (`[STAGE 2: RAW UNFILTERED RESPONSE]` -> `[STAGE 3: REFINED RESPONSE]`), eliminating sequential recursive dual-pass latency and semantic overlap.
+    - Removed token suppression in `process_interaction` that dropped tokens when raw response was detected (`is_speech_stream = False`), enabling real-time streaming into the Stage 2 drawer instead of "streaming into nothing".
+    - Cleaned Pass 2 fallback `synthesis_prompt` with official chat turn boundaries (`<|turn>user ... <turn|>\n<|turn>model\n[STAGE 3: REFINED RESPONSE]`).
+  - `brainuke_throne/server/main.py`:
+    - Added pre-flight check in `/api/v1/cognitive/interact` returning HTTP 503 and auto-buffering prompt into `failed_prompt_buffer` if PC llama-server is offline or loading.
+    - Updated `/api/v1/history` endpoint to support `q` search parameter returning simmered insights prioritized over raw interactions.
+  - `brainuke_throne/ui_desktop/cecilia_ui.py`:
+    - Added `📥 Send Queue (N)` manual flush button in action bar directly above the prompt box with live pending count.
+    - Added `_on_manual_flush_queue()` to dispatch pending backlog on demand.
+    - Updated `_append_speech_chunk` and `_append_raw_chunk` to route `STAGE 2` and `STAGE 3` chunks live into their respective drawers and auto-advance queue items on turn finalization.
+    - Added a 1500ms settling delay upon model ready before flushing backlog queue, preventing immediate dispatch while KV cache / CUDA slots initialize.
+    - Added double-schedule guard (`_backlog_flush_scheduled`) and automatic prompt re-buffering on HTTP errors.
+    - Removed `parent_widget.see(tk.END)` and `self.chat_text.see(tk.END)` from manual drawer toggle callbacks (`_toggle_thought`, `_toggle_raw`, `_toggle_speech`), eliminating involuntary viewport jump/scroll glitches when toggling or scrolling drawers.
+    - Increased HTTP timeout in `_send_interact_request` to 180s.
+  - `tests/test_memory_integrity.py`: Added test suite validating cross-temporal keyword search, simmered insight priority, and endpoint querying.
+- `brainuke_extension` (SerenityDroid Mobile Context Pruning & History Importance):
+  - `Daos.kt` & `SyncRepository.kt`: Added `getRecentMemoryNodes(limit)` to fetch synced DMN insights from Room SQLite.
+  - `LocalInferenceEngine.kt`:
+    - Implemented context pruning over conversation turns within mobile token budget (`contextWindow - maxTokens - 250`).
+    - Anchored prioritized DMN insights (`[THEMATIC ANCHORS & DMN MEMORY]`) in system prompt so core identity/themes survive context saturation.
+    - Prunes oldest turns first while preserving recent turns in chronological order.
+  - `SensoryService.kt`: Updated `processInteraction()` to feed recent turns and DMN memory nodes into `executeReflex()`.
+
+## [0.8.7] - 2026-10-01
+
+- `brainuke_core` & `brainuke_throne` (PC Prompt Queue & Option C Telemetry):
+  - `brainuke_core/memory/vault.py`: Added `failed_prompt_buffer` SQLite table (`id`, `prompt_text`, `target_mode`, `failure_reason`, `retry_count`, `timestamp`, `status`) and helper methods `buffer_failed_prompt`, `get_pending_failed_prompts`, `mark_prompt_status`, and `get_pending_count`.
+  - `brainuke_core/telemetry/hardware.py`: Added native zero-dependency platform memory monitor for Windows:
+    - System RAM via `kernel32.GlobalMemoryStatusEx` (`ctypes`).
+    - Dedicated VRAM via `nvml.dll` (`ctypes`) with graceful fallback to `nvidia-smi`.
+    - Shared VRAM via `pdh.dll` performance counter `\GPU Adapter Memory(*)\Shared Usage` (`ctypes`).
+  - `brainuke_core/cognition/llama_client.py`: Added real-time streaming instrumentation tracking TTFT (Time To First Token in ms), tokens/sec streaming velocity, and prompt/completion/context token counts.
+  - `brainuke_core/cognition/orchestrator.py`: Instrumented token window breakdown (`system_tokens`, `history_tokens`, `user_tokens`, `thought_tokens`, `total_tokens`, `context_window`, `context_pct`) in `OrchestrationResult` and exposed `get_context_metrics()`.
+  - `brainuke_core/cognition/runner_manager.py`: Integrated hardware telemetry and client streaming metrics into `get_status()`.
+  - `brainuke_throne/server/main.py`: Added `/api/v1/queue/pending`, `/api/v1/queue/buffer`, `/api/v1/queue/flush` endpoints; updated `/api/v1/cognitive/interact` to automatically buffer unfulfilled turns on offline diagnostics.
+  - `brainuke_throne/ui_desktop/cecilia_ui.py`:
+    - Fixed offline prompt abandonment: prompts submitted while model is offline/initializing are preserved in `pending_prompt_backlog` and automatically presented to Cecilia once the model finishes loading.
+    - Added live hardware telemetry readouts to `SYSTEM STATUS & DIAGNOSTICS` card: Dedicated VRAM, Shared VRAM, System RAM, TTFT, t/s streaming rate, context window utilization meter, and prompt queue backlog counter.
+  - `tests/test_telemetry_and_queue.py`: Added comprehensive unit test suite covering prompt queue SQLite persistence, hardware memory queries, streaming metrics, and context breakdown.
+
+## [0.8.6] - 2026-10-01
+
+- `brainuke_extension` (SerenityDroid Android):
+  - `Entities.kt`, `Daos.kt`, `BrainukeDatabase.kt`: Added `FailedPromptEntity`, `FailedPromptDao`, and bumped Room DB to v4 for SQLite prompt backlog queueing (`failed_prompt_buffer`).
+  - `SyncRepository.kt`: Added `queueFailedPrompt`, `getPendingFailedPrompts`, `markFailedPromptStatus`, `recordFailedPromptRetry`, `observePendingFailedPromptCount`, and `getPendingFailedPromptCount`.
+  - `SensoryService.kt`:
+    - Added `CognitiveStatus` enum (`DISCONNECTED`, `WAITING`, `THINKING`) and exposed `throneCognitiveStatus`, `mobileCognitiveStatus`, and `flushedTurns` state flows.
+    - Updated `processInteraction()` to buffer unanswered prompts into `failed_prompt_buffer` when Throne offload hits network error/timeout/404 or when local model is unloaded.
+    - Implemented `flushFailedPromptBuffer()` auto-draining queue when Throne reports online or local model loads.
+    - Added `IdleVolitionScheduler` with incremental idle timer ladder (5m -> 10m -> 15m -> 30m -> 45m -> 60m) and notable sensory delta detection.
+  - `MainActivity.kt`:
+    - Transformed mode toggle button into explicit `Throne` vs `Mobile` indicator with live cognitive states (`👑 Throne [Thinking]`, `👑 Throne [Waiting]`, `👑 Throne [Disconnected]`, `📱 Mobile [Thinking]`, `📱 Mobile [Waiting]`, `📱 Mobile [Standby]`).
+    - Added dark-tinted loading overlay frame (`throneLoadingOverlay`) with centered glowing card and progress indicator during Throne inference.
+    - Added `backlogChip` to action bar displaying pending buffer count with interactive backlog inspector dialog and manual force flush trigger.
+    - Connected `flushedTurns` flow to automatically append drained prompt responses into active chat stream.
+- `brainuke_core` & `brainuke_throne`:
+  - `brainuke_core/affect/engine.py`: Implemented Refined Option 1 PAD-Vector Salience (`calculate_volition_salience` & `should_trigger_volition`) with Dynamic Resonance Coefficient ($R_m = 1.0 + 1.5 M$), Thematic Threat evaluation ($\sqrt{w_V \Delta V^2 + w_D \Delta D^2 + w_A \Delta A^2 (0.1 + 0.9M)}$), and differential decay curves distinguishing Vital events ($\lambda_{vital} = 0.001$) from transient Loud events ($\lambda_{loud} = 0.15$).
+  - `brainuke_core/cognition/simmer_bus.py`: Integrated Volition Salience evaluation and candidate broadcasting (`[Volition Candidate]`) into DMN consolidation cycle.
+  - `tests/test_volition_salience.py`: Added test suite verifying rapid decay of loud/empty excitement, persistence of vital memory nodes, equilibrium threat triggers, and rejection of substanceless shouting.
+
+## [0.8.5] - 2026-09-30
+
+- `brainuke_throne/ui_desktop/cecilia_ui.py`:
+  - Enforced UI flow for dropdowns and text: dropdown buttons ordered left-to-right (Stage 1 Thoughts -> Stage 2 Raw Response -> Stage 3 Refined Response); content text blocks stacked top-to-bottom (Stage 1 Thoughts -> Stage 2 Raw Response -> Stage 3 Refined Response).
+  - Upgraded dropdown button titles to dual-line format (`▼ Stage 1\nThoughts`, `▶ Stage 2\nRaw Response`, `▼ Stage 3\nRefined Response`) for space efficiency and scaling clarity across High-DPI screens.
+  - Implemented `_repack_boxes()` in `_build_stage_drawer_component` and `_repack_streaming_boxes()` in streaming lifecycle to guarantee strict top-to-bottom vertical stacking regardless of toggle sequence.
+  - Added missing `import re` in module imports.
+- `brainuke_throne/ui_desktop/app.js` & `style.css`:
+  - Updated web drawer summaries with dual-line structure (`.stage-tag` and `.stage-name`) with column flex styling for space and scaling clarity.
+- `tests/test_ui_history.py`:
+  - Added unit test coverage `test_stage_drawer_flow_and_dual_line_titles` and `test_streaming_turn_flow` validating left-to-right button flow, top-to-bottom text stacking, dual-line titles, and auto-minimizing streaming transitions.
+
+## [0.8.4] - 2026-09-30
+
+- `brainuke_core/memory/vault.py`:
+  - Added auto-migration for `turn_uuid TEXT UNIQUE` column on `interaction_history` table.
+  - Implemented idempotent ingestion in `ingest_interaction()` with `INSERT OR IGNORE` and `turn_uuid` deduplication.
+  - Enhanced `get_delta_pack()` to support sequence IDs (`since_insight_id`, `since_turn_id`) and symmetric PC conversation turn extraction (`include_pc_turns=True`).
+- `brainuke_throne/server/main.py`:
+  - Updated `POST /api/v1/sync/push` to ingest mobile dialogue turns with `turn_uuid` deduplication and signal pending trigger waiters.
+  - Updated `GET /api/v1/sync/pull` to accept `since_insight_id` and `since_turn_id`, symmetrically returning `pc_turns`, `insights`, and sequence high-water marks.
+  - Re-architected `POST /api/v1/sync/trigger` into a sequenced 4-step pipeline: Downlink push request (`action="push_first"`), await mobile push, execute DMN simmer consolidation, and broadcast `delta_ready` for mobile pull.
+- `brainuke_extension` (SerenityDroid Android):
+  - `Entities.kt`: Added `turnUuid` unique index to `ConversationEntity` to guarantee idempotent room persistence.
+  - `Daos.kt`: Added `getLatestServerInsightId()` to `MemoryNodeDao` and `getLatestServerTurnId()` to `ConversationDao`.
+  - `BrainukeDatabase.kt`: Bumped Room database schema version to 3.
+  - `BrainukeModels.kt`: Added `action` and `syncId` to `SyncRequest`, and `status` and `syncId` to `SyncUpdate`.
+  - `ThroneClient.kt`: Updated `pullSyncDelta()` with `since_insight_id` and `since_turn_id` query parameters.
+  - `SyncRepository.kt`: Implemented single-flight `Mutex` to prevent concurrent sync executions; added `action` modes (`full`, `push_only`, `pull_only`); added symmetric PC dialogue turn pull and Room DB storage.
+  - `SensoryService.kt`: Updated downlink listener to handle sequenced `action="push_first"` and `delta_ready` pull trigger.
+  - `MainActivity.kt`: Removed redundant duplicate `triggerSync()` call on `SyncRequest` event, eliminating the double-trigger concurrency storm.
+- `tests/test_sync_and_weighting.py`:
+  - Added test coverage for `test_turn_uuid_deduplication` and `test_get_delta_pack_symmetric_pc_turns`.
+
+## [0.8.3] - 2026-09-30
+
+- `brainuke_core/cognition/thought_isolation.py`:
+  - Implemented 3-stage extraction pipeline (`isolate_stages`): separates Stage 1 (`thought`), Stage 2 (`raw_response`), and Stage 3 (`speech`).
+  - Added `RAW_RESPONSE_TAGS` supporting `[TACTICAL_ANALYSIS_COMPLETE]`, `[STATUS: UNFILTERED]`, `[TACTICAL_ANALYSIS]`, `[UNFILTERED]`, and dual responses.
+  - Added channel thought tag extraction and scrubbing for `<|channel>thought...<channel|>`, `<channel:thought>`, `<channel>thought`, and `<|channel|>thought`.
+  - Preserved backward-compatible 2-tuple return for `isolate()` and `sanitize_speech()`.
+- `brainuke_core/cognition/orchestrator.py`:
+  - Added `raw_response: str = ""` field to `OrchestrationResult`.
+  - Updated `process_interaction()` to isolate 3 stages and persist `raw_response` through `MemoryVault`.
+- `brainuke_core/memory/vault.py`:
+  - Added auto-migration for `raw_response` column in `interaction_history` table.
+  - Updated `ingest_interaction()`, `get_recent_interactions()`, and `get_random_interactions()` to store and query `raw_response`.
+- `brainuke_core/session/state.py`:
+  - Updated `SessionManager.record_turn()` to store `raw_response` in conversational sliding window.
+- `brainuke_throne/server/main.py`:
+  - Updated `/api/v1/cognitive/interact` to broadcast `raw_response` over SSE and return `"raw_response"` in JSON response.
+- `brainuke_throne/ui_desktop/cecilia_ui.py`:
+  - Implemented `_build_stage_drawer_component()` providing side-by-side stacked buttons `[ 3. Response ] [ 2. Raw Response ] [ 1. Thought ]`.
+  - Styled Stage 2 Raw Response drawer with darkened background (`#06140D`), soft mint green text tint (`#A7F3D0`), and hideable toggle.
+  - Implemented auto-minimizing streaming pipeline: Stage 1 (Thought) auto-closes when Stage 2 (Raw Response) streams; Stage 2 closes when Stage 3 (Refined Response) streams into main speech block.
+  - Integrated interactive side-by-side dropdowns into Memory & DMN History feed (`_render_history_feed`) and live chat window (`_append_message`).
+  - Enforced targeted mousewheel bindings across all drawer and button components.
+  - Added `raw_chunk` and `raw_response` event handling in `_poll_event_queue` and `_handle_sse_event`.
+- `brainuke_throne/ui_desktop/style.css` & `app.js`:
+  - Added `.drawers-row` and `.raw-drawer` styles with `#06140D` background and `#A7F3D0` green tint.
+- `tests/test_thought_isolation.py`:
+  - Added test coverage for `isolate_stages()` with tactical analysis, unfiltered status tags, dual responses, and channel thought tags.
+
+## [0.8.2] - 2026-09-30
+
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/network/ThroneClient.kt`:
+  - Made `authToken` a `@Volatile var` and added `updateAuthToken()` method.
+  - Updated `pairWithThrone()` to dynamically ingest and store active machine token from Throne handshake response.
+  - Added automated pairing handshake re-try upon encountering HTTP 401 or 403 in `pushSyncBatch`, `pullSyncDelta`, and `listenToDownlink`.
+- `brainuke_extension/app/src/main/java/com/brainuke/serenitydroid/MainActivity.kt`:
+  - Wired `serviceConnection` to initialize with cached `SharedPreferences` auth token and asynchronously execute zero-touch `/api/v1/pairing/handshake` on connect.
+  - Added auto-repair re-pairing logic in `triggerSync()` on 401/403 failures.
+  - Bound SSE downlink `BrainukeEvent.SyncRequest` directly to `triggerSync()` for PC-initiated synchronization.
+  - Upgraded `inputEditText` with `InputType.TYPE_TEXT_FLAG_MULTI_LINE`, `TYPE_TEXT_FLAG_CAP_SENTENCES`, `TYPE_TEXT_FLAG_AUTO_CORRECT`, 5-line height bounds, and `EditorInfo.IME_ACTION_NONE`.
+- `brainuke_throne/ui_desktop/cecilia_ui.py`:
+  - Upgraded `self.entry_input` from single-line `tk.Entry` to multi-line `tk.Text` with dynamic 1-5 visual line height expansion (`_adjust_input_height`), `<Shift-Return>`/`<Control-Return>` newline handling, and instant `<Return>` message sending.
+  - Implemented targeted mousewheel scrolling helper (`_bind_targeted_mousewheel`) across `chat_text`, `hist_text`, thought drawer widgets, and `entry_input` ensuring mousewheel scrolls strictly the hovered container without bubbling or scrolling other windows.
+- `C:/Users/ccrg6/Desktop/Hub/Serenities/SerenityPC/TODO.txt`:
+  - Added targeted mousewheel scrolling and multi-line keystroke input accuracy plan under `Needs fixing:`.
+
+## [0.8.1] - 2026-09-30
+
+- `brainuke_core/cognition/runner_manager.py`:
+  - Added `stop_runner()` with graceful `.terminate()`, timeout wait, fallback `.kill()`, port 8081 freeing, and `atexit.register(self.stop_runner)` to prevent orphaned `llama-server` background instances.
+- `brainuke_throne/server/main.py`:
+  - Added `POST /api/v1/models/stop` endpoint with token authentication to stop runner and drop active model from memory.
+  - Added FastAPI `lifespan` handler executing `pc_runner_manager.stop_runner()` on server shutdown.
+- `brainuke_throne/ui_desktop/cecilia_ui.py`:
+  - Implemented Unified Shutdown inside `close()`: issues HTTP POST `/api/v1/models/stop` to Throne, executes local fallback `PCRunnerManager().stop_runner()`, and terminates auto-launched server child processes.
+- `tests/test_model_manager.py` & `tests/test_sync_and_weighting.py`:
+  - Added test coverage for `stop_runner()` method and `stop_model_endpoint`.
+
 ## [0.8.0] - 2026-09-28
 
 - `.gitignore`:

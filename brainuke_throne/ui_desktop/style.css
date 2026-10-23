@@ -214,30 +214,89 @@ body {
   letter-spacing: 0.05em;
 }
 
-/* THOUGHT ISOLATION ACCORDION */
+/* THOUGHT & RAW RESPONSE DRAWERS */
+.drawers-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
 .thought-drawer {
-  margin-bottom: 12px;
+  margin-bottom: 8px;
   border: 1px solid rgba(110, 231, 183, 0.25);
   border-radius: 8px;
   background: rgba(6, 78, 59, 0.2);
   overflow: hidden;
 }
 
+.raw-drawer {
+  margin-bottom: 8px;
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  border-radius: 8px;
+  background: #06140D;
+  overflow: hidden;
+}
+
+.raw-summary {
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-family: var(--font-mono);
+  color: #6EE7B7;
+  background: rgba(16, 185, 129, 0.12);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.raw-summary:hover {
+  background: rgba(16, 185, 129, 0.2);
+}
+
+.raw-content {
+  padding: 12px;
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  color: #A7F3D0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #06140D;
+  border-top: 1px solid rgba(16, 185, 129, 0.2);
+  max-height: 280px;
+  overflow-y: auto;
+}
+
 .thought-summary {
-  padding: 8px 12px;
+  padding: 6px 12px;
   cursor: pointer;
   font-size: 0.78rem;
   font-family: var(--font-mono);
   color: var(--text-thought);
   user-select: none;
   display: flex;
-  align-items: center;
-  gap: 6px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
   background: rgba(16, 185, 129, 0.08);
 }
 
 .thought-summary:hover {
   background: rgba(16, 185, 129, 0.15);
+}
+
+.stage-tag {
+  font-size: 0.70rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.85;
+}
+
+.stage-name {
+  font-size: 0.80rem;
+  font-weight: 600;
 }
 
 .thought-content {

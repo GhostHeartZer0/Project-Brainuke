@@ -7,6 +7,8 @@ Stores historical telemetry pool, conversation transcripts, and distilled DMN in
 import sqlite3
 import json
 import time
+import uuid
+import re
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
@@ -67,6 +69,11 @@ class MemoryVault:
                 cursor.execute("ALTER TABLE interaction_history ADD COLUMN source_device TEXT DEFAULT 'pc'")
             if "influence_weight" not in ih_cols:
                 cursor.execute("ALTER TABLE interaction_history ADD COLUMN influence_weight REAL DEFAULT 1.0")
+            if "raw_response" not in ih_cols:
+                cursor.execute("ALTER TABLE interaction_history ADD COLUMN raw_response TEXT DEFAULT ''")
+            if "turn_uuid" not in ih_cols:
+                cursor.execute("ALTER TABLE interaction_history ADD COLUMN turn_uuid TEXT")
+            cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_interaction_turn_uuid ON interaction_history(turn_uuid) WHERE turn_uuid IS NOT NULL")
 
             # 3. Distilled DMN Insights & World Model Nodes
             cursor.execute("""
@@ -156,6 +163,20 @@ class MemoryVault:
                 )
             """)
 
+            # 7. Failed / Unfinished prompt buffer (Desktop & Core Backlog)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS failed_prompt_buffer (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    prompt_text TEXT NOT NULL,
+                    target_mode TEXT DEFAULT 'pc',
+                    failure_reason TEXT NOT NULL,
+                    retry_count INTEGER DEFAULT 0,
+                    timestamp INTEGER NOT NULL,
+                    status TEXT DEFAULT 'pending'
+                )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_failed_prompt_status ON failed_prompt_buffer(status)")
+
             conn.commit()
 
 
@@ -190,24 +211,29 @@ class MemoryVault:
         final_response: str,
         affect_state: Optional[Dict[str, float]] = None,
         source_device: str = "pc",
-        influence_weight: Optional[float] = None
+        influence_weight: Optional[float] = None,
+        raw_response: str = "",
+        turn_uuid: Optional[str] = None
     ) -> int:
         """
         Records a single conversation turn.
         PC interactions default to weight 1.0 (master cognitive core).
         Android companion interactions default to weight 0.35 (tether).
+        Supports idempotent ingestion via turn_uuid deduplication.
         """
         if influence_weight is None:
             influence_weight = 1.0 if source_device == "pc" else 0.35
+        if not turn_uuid:
+            turn_uuid = str(uuid.uuid4())
 
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT INTO interaction_history (
+                INSERT OR IGNORE INTO interaction_history (
                     user_input, thought_stream, final_response, affect_state,
-                    timestamp, simmered, source_device, influence_weight
+                    timestamp, simmered, source_device, influence_weight, raw_response, turn_uuid
                 )
-                VALUES (?, ?, ?, ?, ?, 0, ?, ?)
+                VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
             """, (
                 user_input,
                 thought_stream,
@@ -215,10 +241,16 @@ class MemoryVault:
                 json.dumps(affect_state or {}),
                 int(time.time() * 1000),
                 source_device,
-                influence_weight
+                influence_weight,
+                raw_response,
+                turn_uuid
             ))
             conn.commit()
-            return cursor.lastrowid
+            if cursor.lastrowid:
+                return cursor.lastrowid
+            cursor.execute("SELECT id FROM interaction_history WHERE turn_uuid = ?", (turn_uuid,))
+            row = cursor.fetchone()
+            return row["id"] if row else 0
 
     def get_recent_interactions(self, limit: int = 10, source_device: Optional[str] = None) -> List[Dict[str, Any]]:
         """Retrieves most recent interaction records, optionally filtered by source_device."""
@@ -227,7 +259,7 @@ class MemoryVault:
             if source_device:
                 cursor.execute("""
                     SELECT id, user_input, thought_stream, final_response, affect_state, timestamp,
-                           source_device, influence_weight
+                           source_device, influence_weight, raw_response, turn_uuid
                     FROM interaction_history
                     WHERE source_device = ?
                     ORDER BY timestamp DESC
@@ -236,7 +268,7 @@ class MemoryVault:
             else:
                 cursor.execute("""
                     SELECT id, user_input, thought_stream, final_response, affect_state, timestamp,
-                           source_device, influence_weight
+                           source_device, influence_weight, raw_response, turn_uuid
                     FROM interaction_history
                     ORDER BY timestamp DESC
                     LIMIT ?
@@ -253,7 +285,7 @@ class MemoryVault:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT id, user_input, thought_stream, final_response, affect_state, timestamp,
-                       source_device, influence_weight
+                       source_device, influence_weight, raw_response, turn_uuid
                 FROM interaction_history
                 ORDER BY RANDOM()
                 LIMIT ?
@@ -363,22 +395,163 @@ class MemoryVault:
                 })
             return grounding
 
-    def get_delta_pack(self, since_timestamp: int = 0) -> List[Dict[str, Any]]:
-        """Extracts new memory insights generated since last Android sync."""
+    def search_memory(
+        self,
+        query: str,
+        limit: int = 10,
+        max_recent: int = 3
+    ) -> Dict[str, Any]:
+        """
+        Cross-temporal keyword memory retrieval:
+        1. Prioritizes distilled insights (simmered DMN thoughts) across all time.
+        2. Retrieves latest conversational turns (guaranteeing recency buffer).
+        3. Retrieves matching historical turns across all time.
+        """
+        raw_tokens = [
+            t.lower().strip() for t in re.split(r"[\s,;.!?'\"()\[\]{}]+", query)
+            if len(t.strip()) >= 3 and t.lower().strip() not in {
+                "the", "and", "for", "with", "this", "that", "you", "are", "have", "from",
+                "what", "when", "where", "how", "why", "will", "your", "about"
+            }
+        ]
+        # Deduplicate and cap to top distinct keywords to prevent SQLite expression tree overflow
+        tokens = list(dict.fromkeys(raw_tokens))[:12]
+
         with self._get_connection() as conn:
             cursor = conn.cursor()
+
+            # Priority 1: Distilled DMN insights (Simmered Thoughts across all time)
+            matched_insights = []
+            if tokens:
+                try:
+                    conditions = " OR ".join(["insight LIKE ? OR concept_family LIKE ?" for _ in tokens])
+                    params = []
+                    for t in tokens:
+                        p = f"%{t}%"
+                        params.extend([p, p])
+
+                    cursor.execute(f"""
+                        SELECT id, insight, emotional_shift, world_delta, concept_family,
+                               importance_weight, dominance_weight, timestamp
+                        FROM distilled_insights
+                        WHERE {conditions}
+                        ORDER BY importance_weight DESC, timestamp DESC
+                        LIMIT ?
+                    """, (*params, limit))
+                    for row in cursor.fetchall():
+                        matched_insights.append({
+                            "id": row["id"],
+                            "insight": row["insight"],
+                            "emotional_shift": json.loads(row["emotional_shift"]),
+                            "world_delta": json.loads(row["world_delta"]),
+                            "concept_family": row["concept_family"] or "general",
+                            "importance_weight": float(row["importance_weight"] or 1.0),
+                            "dominance_weight": float(row["dominance_weight"] or 0.5),
+                            "timestamp": row["timestamp"],
+                            "source": "simmered_insight"
+                        })
+                except Exception:
+                    pass
+
+            # Priority 2: Latest few prompts (immediate conversational continuity)
             cursor.execute("""
-                SELECT id, insight, emotional_shift, world_delta, concept_family,
-                       importance_weight, dominance_weight, timestamp
-                FROM distilled_insights
-                WHERE timestamp > ?
-                ORDER BY timestamp ASC
-            """, (since_timestamp,))
+                SELECT id, user_input, thought_stream, final_response, affect_state,
+                       timestamp, source_device, influence_weight, raw_response, simmered
+                FROM interaction_history
+                ORDER BY timestamp DESC
+                LIMIT ?
+            """, (max_recent,))
+            recent_prompts = [dict(row) for row in cursor.fetchall()]
+            recent_ids = {r["id"] for r in recent_prompts}
+
+            # Priority 3: Historical interaction records across all time matching keywords
+            historical_matches = []
+            if tokens:
+                try:
+                    h_conditions = " OR ".join(["user_input LIKE ? OR final_response LIKE ?" for _ in tokens])
+                    h_params = []
+                    for t in tokens:
+                        p = f"%{t}%"
+                        h_params.extend([p, p])
+                    cursor.execute(f"""
+                        SELECT id, user_input, thought_stream, final_response, affect_state,
+                               timestamp, source_device, influence_weight, raw_response, simmered
+                        FROM interaction_history
+                        WHERE ({h_conditions})
+                        ORDER BY simmered DESC, influence_weight DESC, timestamp DESC
+                        LIMIT ?
+                    """, (*h_params, limit))
+                    for row in cursor.fetchall():
+                        if row["id"] not in recent_ids:
+                            historical_matches.append(dict(row))
+                except Exception:
+                    pass
+
+            return {
+                "simmered_insights": matched_insights,
+                "recent_prompts": recent_prompts,
+                "historical_interactions": historical_matches
+            }
+
+    def get_grounding_for_prompt(self, user_input: str, limit: int = 6) -> List[Dict[str, Any]]:
+        """
+        Retrieves thematic grounding nodes prioritized for the active user prompt.
+        Prioritizes simmered DMN insights matching keywords across all time,
+        falling back to recent grounding nodes to maintain stability.
+        """
+        search_res = self.search_memory(user_input, limit=limit)
+        simmered = search_res.get("simmered_insights", [])
+
+        if len(simmered) >= limit:
+            return simmered[:limit]
+
+        recent = self.get_recent_grounding(limit=limit)
+        existing_ids = {s["id"] for s in simmered}
+        for r in recent:
+            if r["id"] not in existing_ids:
+                simmered.append(r)
+                if len(simmered) >= limit:
+                    break
+
+        return simmered
+
+    def get_delta_pack(
+        self,
+        since_timestamp: int = 0,
+        since_insight_id: int = 0,
+        since_turn_id: int = 0,
+        include_pc_turns: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Extracts new memory insights and PC dialogue turns generated since last Android sync.
+        Uses sequence IDs (since_insight_id, since_turn_id) with fallback to since_timestamp.
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            if since_insight_id > 0:
+                cursor.execute("""
+                    SELECT id, insight, emotional_shift, world_delta, concept_family,
+                           importance_weight, dominance_weight, timestamp
+                    FROM distilled_insights
+                    WHERE id > ?
+                    ORDER BY id ASC
+                """, (since_insight_id,))
+            else:
+                cursor.execute("""
+                    SELECT id, insight, emotional_shift, world_delta, concept_family,
+                           importance_weight, dominance_weight, timestamp
+                    FROM distilled_insights
+                    WHERE timestamp > ?
+                    ORDER BY id ASC
+                """, (since_timestamp,))
             rows = cursor.fetchall()
 
-            delta_pack = []
+            insights = []
+            max_insight_id = since_insight_id
             for row in rows:
-                delta_pack.append({
+                if row["id"] > max_insight_id:
+                    max_insight_id = row["id"]
+                insights.append({
                     "id": row["id"],
                     "insight": row["insight"],
                     "emotional_shift": json.loads(row["emotional_shift"]),
@@ -388,7 +561,50 @@ class MemoryVault:
                     "dominance_weight": float(row["dominance_weight"] or 0.5),
                     "timestamp": row["timestamp"]
                 })
-            return delta_pack
+
+            pc_turns = []
+            max_turn_id = since_turn_id
+            if include_pc_turns:
+                if since_turn_id > 0:
+                    cursor.execute("""
+                        SELECT id, user_input, thought_stream, final_response, affect_state,
+                               timestamp, source_device, influence_weight, raw_response, turn_uuid
+                        FROM interaction_history
+                        WHERE id > ? AND source_device = 'pc'
+                        ORDER BY id ASC
+                        LIMIT 100
+                    """, (since_turn_id,))
+                else:
+                    cursor.execute("""
+                        SELECT id, user_input, thought_stream, final_response, affect_state,
+                               timestamp, source_device, influence_weight, raw_response, turn_uuid
+                        FROM interaction_history
+                        WHERE timestamp > ? AND source_device = 'pc'
+                        ORDER BY id ASC
+                        LIMIT 100
+                    """, (since_timestamp,))
+                turn_rows = cursor.fetchall()
+                for tr in turn_rows:
+                    if tr["id"] > max_turn_id:
+                        max_turn_id = tr["id"]
+                    pc_turns.append({
+                        "id": tr["id"],
+                        "turn_uuid": tr["turn_uuid"] or f"turn_pc_{tr['id']}",
+                        "user_input": tr["user_input"],
+                        "thought_stream": tr["thought_stream"] or "",
+                        "final_response": tr["final_response"] or "",
+                        "raw_response": tr["raw_response"] or "",
+                        "affect_state": json.loads(tr["affect_state"] or "{}"),
+                        "timestamp": tr["timestamp"],
+                        "source_device": tr["source_device"]
+                    })
+
+            return {
+                "insights": insights,
+                "pc_turns": pc_turns,
+                "max_insight_id": max_insight_id,
+                "max_turn_id": max_turn_id
+            }
 
     # --- PHASE IV: CONTEXTUAL SANDBOX & QUARANTINE ---
 
@@ -637,4 +853,59 @@ class MemoryVault:
                 "recent_interactions": recent,
                 "historical_samples": samples
             }
+
+    # --- FAILED / UNFINISHED PROMPT BUFFER ---
+    def buffer_failed_prompt(self, prompt_text: str, failure_reason: str = "model_offline", target_mode: str = "pc") -> int:
+        """Buffers an unfinished prompt into SQLite queue."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO failed_prompt_buffer (prompt_text, target_mode, failure_reason, retry_count, timestamp, status)
+                VALUES (?, ?, ?, 0, ?, 'pending')
+            """, (prompt_text, target_mode, failure_reason, int(time.time() * 1000)))
+            conn.commit()
+            return cursor.lastrowid
+
+    def get_pending_failed_prompts(self, target_mode: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Returns all pending unfinished prompts ordered by timestamp ASC."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            if target_mode:
+                cursor.execute("""
+                    SELECT id, prompt_text, target_mode, failure_reason, retry_count, timestamp, status
+                    FROM failed_prompt_buffer
+                    WHERE status = 'pending' AND target_mode = ?
+                    ORDER BY timestamp ASC
+                """, (target_mode,))
+            else:
+                cursor.execute("""
+                    SELECT id, prompt_text, target_mode, failure_reason, retry_count, timestamp, status
+                    FROM failed_prompt_buffer
+                    WHERE status = 'pending'
+                    ORDER BY timestamp ASC
+                """)
+            return [dict(row) for row in cursor.fetchall()]
+
+    def mark_prompt_status(self, prompt_id: int, status: str = "flushed") -> bool:
+        """Updates status of a buffered prompt ('flushed', 'discarded', 'pending')."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE failed_prompt_buffer
+                SET status = ?
+                WHERE id = ?
+            """, (status, prompt_id))
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def get_pending_count(self, target_mode: Optional[str] = None) -> int:
+        """Returns count of pending prompts in the buffer."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            if target_mode:
+                cursor.execute("SELECT COUNT(*) FROM failed_prompt_buffer WHERE status = 'pending' AND target_mode = ?", (target_mode,))
+            else:
+                cursor.execute("SELECT COUNT(*) FROM failed_prompt_buffer WHERE status = 'pending'")
+            row = cursor.fetchone()
+            return row[0] if row else 0
 

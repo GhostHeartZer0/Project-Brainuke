@@ -14,6 +14,7 @@ import os
 import sys
 import shutil
 import subprocess
+import atexit
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -31,6 +32,7 @@ class PCRunnerManager:
         self.workspace_root = Path(__file__).resolve().parent.parent.parent
         self._managed_process: Optional[subprocess.Popen] = None
         self._ensure_config()
+        atexit.register(self.stop_runner)
 
     def _ensure_config(self) -> Dict[str, Any]:
         """Loads models.json, ensuring valid default structure."""
@@ -72,17 +74,79 @@ class PCRunnerManager:
         if configured_path and os.path.exists(configured_path):
             return configured_path, True
 
-        # 2. Check workspace models/ folder fallback
+        # 2. Check workspace models/ folder fallback and parent onedir / SerenityPC Models folders
+        candidate_model_dirs = [
+            self.workspace_root / "models",
+            self.workspace_root.parent / "Models",
+            self.workspace_root.parent / "models",
+            self.workspace_root.parent.parent.parent / "Models",
+            self.workspace_root.parent.parent.parent / "models",
+        ]
         if model_id == self.NORMAL_MODEL_ID:
-            ws_fallback = self.workspace_root / "models" / "26B" / "gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf"
-            if ws_fallback.exists():
-                return str(ws_fallback), True
+            for m_dir in candidate_model_dirs:
+                c1 = m_dir / "26B" / "gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf"
+                if c1.exists():
+                    return str(c1), True
+                c2 = m_dir / "gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf"
+                if c2.exists():
+                    return str(c2), True
         elif model_id == self.SECRET_MODEL_ID:
-            ws_fallback = self.workspace_root / "models" / "26B-unc" / "gemma-4-26B-A4B-it-qat-q4_0-unquantized-uncensored-heretic-v2.i1-Q4_K_M.gguf"
-            if ws_fallback.exists():
-                return str(ws_fallback), True
+            for m_dir in candidate_model_dirs:
+                c1 = m_dir / "26B-unc" / "gemma-4-26B-A4B-it-qat-q4_0-unquantized-uncensored-heretic-v2.i1-Q4_K_M.gguf"
+                if c1.exists():
+                    return str(c1), True
+                c2 = m_dir / "gemma-4-26B-A4B-it-qat-q4_0-unquantized-uncensored-heretic-v2.i1-Q4_K_M.gguf"
+                if c2.exists():
+                    return str(c2), True
+
+        # 3. Automatic fallback: scan candidate directories for ANY valid .gguf file
+        discovered = self.scan_available_models()
+        if discovered:
+            return discovered[0]["path"], True
 
         return configured_path or "unknown", False
+
+    def scan_available_models(self) -> List[Dict[str, Any]]:
+        """Scans candidate directories for available .gguf model files."""
+        candidate_model_dirs = [
+            self.workspace_root / "models",
+            self.workspace_root.parent / "Models",
+            self.workspace_root.parent / "models",
+            self.workspace_root.parent.parent.parent / "Models",
+            self.workspace_root.parent.parent.parent / "models",
+        ]
+        found = []
+        seen = set()
+        for m_dir in candidate_model_dirs:
+            if m_dir.is_dir():
+                try:
+                    for gguf in sorted(m_dir.glob("**/*.gguf")):
+                        if gguf.is_file():
+                            p_str = str(gguf.resolve())
+                            if p_str not in seen:
+                                seen.add(p_str)
+                                found.append({
+                                    "name": gguf.name,
+                                    "path": p_str,
+                                    "size_mb": round(gguf.stat().st_size / (1024 * 1024), 1)
+                                })
+                except Exception:
+                    pass
+        return found
+
+    def set_custom_model_path(self, model_path: str, model_id: Optional[str] = None) -> Dict[str, Any]:
+        """Sets a custom model path for active or custom model."""
+        clean_path = str(model_path).strip()
+        if not os.path.exists(clean_path):
+            return {"status": "error", "error": f"Model file not found on disk: {clean_path}"}
+        
+        cfg = self._ensure_config()
+        target_id = model_id or self.get_active_model_id()
+        models = cfg.setdefault("pc_runner", {}).setdefault("models", {})
+        target_cfg = models.setdefault(target_id, {})
+        target_cfg["path"] = clean_path
+        self._save_config(cfg)
+        return {"status": "updated", "active_model": target_id, "path": clean_path}
 
     def select_model(self, alias_or_id: str, auto_reload: bool = True) -> Dict[str, Any]:
         """
@@ -183,6 +247,20 @@ class PCRunnerManager:
 
         launch_cmd = self.get_launch_command(active_id)
 
+        hw_telemetry = {}
+        try:
+            from brainuke_core.telemetry.hardware import get_all_hardware_telemetry
+            hw_telemetry = get_all_hardware_telemetry()
+        except Exception:
+            pass
+
+        client_telemetry = {}
+        if llama_client is not None and hasattr(llama_client, "get_telemetry"):
+            try:
+                client_telemetry = llama_client.get_telemetry()
+            except Exception:
+                pass
+
         return {
             "online": is_loaded,
             "status": "loaded" if is_loaded else "offline",
@@ -195,7 +273,10 @@ class PCRunnerManager:
             "inference_settings": inference_settings,
             "models": models_summary,
             "launch_command": launch_cmd,
-            "process_managed": (self._managed_process is not None and self._managed_process.poll() is None)
+            "process_managed": (self._managed_process is not None and self._managed_process.poll() is None),
+            "hardware": hw_telemetry,
+            "telemetry": client_telemetry,
+            "discovered_models": self.scan_available_models()
         }
 
     def update_inference_settings(self, settings: Dict[str, Any]) -> Dict[str, Any]:
@@ -260,8 +341,15 @@ class PCRunnerManager:
         if on_path:
             return on_path
 
+        ws = Path(__file__).resolve().parent.parent.parent
         candidates = [
             r"C:\Program Files\Android\Android Studio\plugins\gemini\resources\llamacpp\llama-server.exe",
+            str(ws.parent / "Tools" / "llama-dist" / "llama-server.exe"),
+            str(ws.parent / "_internal" / "Tools" / "llama-dist" / "llama-server.exe"),
+            str(ws.parent / "temp_zip" / "llama-server.exe"),
+            str(ws.parent.parent.parent / "Tools" / "llama-dist" / "llama-server.exe"),
+            str(ws.parent.parent.parent / "temp_zip" / "llama-server.exe"),
+            str(ws / "temp_zip" / "llama-server.exe"),
             os.path.expanduser(r"~\Desktop\Desktop\Hub\SerenityPC\temp_zip\llama-server.exe"),
             os.path.expanduser(r"~\Desktop\Hub\Serenities\SerenityPC\temp_zip\llama-server.exe"),
             os.path.expanduser(r"~\llama-server.exe"),
@@ -329,23 +417,7 @@ class PCRunnerManager:
         binary = self.find_llama_server_binary()
 
         # Stop existing managed process if running
-        if self._managed_process is not None and self._managed_process.poll() is None:
-            try:
-                self._managed_process.terminate()
-                self._managed_process.wait(timeout=3)
-            except Exception:
-                try:
-                    self._managed_process.kill()
-                except Exception:
-                    pass
-            self._managed_process = None
-
-        # Cleanly free port 8081 if occupied by any zombie/prior process
-        try:
-            from brainuke_throne.tls.provisioner import TLSProvisioner
-            TLSProvisioner.free_port(port)
-        except Exception:
-            pass
+        self.stop_runner()
 
         # Update launcher bat script
         launcher_bat = self.workspace_root / "start_llama_server.bat"
@@ -405,10 +477,10 @@ class PCRunnerManager:
                     "command": cmd_str,
                     "note": f"Started llama-server (PID {self._managed_process.pid}) for {active_id}."
                 }
-            except Exception as e:
+            except Exception:
                 return {
                     "status": "error",
-                    "error": str(e),
+                    "error": "Failed to launch runner process.",
                     "model_id": active_id,
                     "command": cmd_str
                 }
@@ -443,3 +515,43 @@ class PCRunnerManager:
             "context_window": ctx_window,
             "note": f"Model KV cache slot erased. Context window capacity ({ctx_window}) preserved intact."
         }
+
+    def stop_runner(self) -> Dict[str, Any]:
+        """
+        Stops the managed llama-server process cleanly, waits for exit,
+        falls back to kill(), and ensures port 8081 is freed.
+        """
+        stopped = False
+        pid = None
+        if self._managed_process is not None:
+            pid = self._managed_process.pid
+            if self._managed_process.poll() is None:
+                try:
+                    self._managed_process.terminate()
+                    self._managed_process.wait(timeout=3)
+                    stopped = True
+                except Exception:
+                    try:
+                        self._managed_process.kill()
+                        self._managed_process.wait(timeout=2)
+                        stopped = True
+                    except Exception:
+                        pass
+            self._managed_process = None
+
+        cfg = self._ensure_config()
+        port = cfg.get("pc_runner", {}).get("port", 8081)
+        try:
+            from brainuke_throne.tls.provisioner import TLSProvisioner
+            TLSProvisioner.free_port(port)
+        except Exception:
+            pass
+
+        return {
+            "status": "stopped",
+            "pid": pid,
+            "stopped": stopped,
+            "port_freed": port,
+            "note": f"Llama-server stopped and port {port} freed."
+        }
+

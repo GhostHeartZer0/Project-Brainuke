@@ -24,7 +24,8 @@ class SessionManager:
         thought_stream: str,
         final_response: str,
         affect_state: Optional[Dict[str, float]] = None,
-        source_device: str = "pc"
+        source_device: str = "pc",
+        raw_response: str = ""
     ) -> Dict[str, Any]:
         """Appends a dialogue turn to the active session sliding window."""
         turn = {
@@ -33,6 +34,7 @@ class SessionManager:
             "user_input": user_input,
             "thought_stream": thought_stream,
             "final_response": final_response,
+            "raw_response": raw_response,
             "affect_state": affect_state or {},
             "timestamp": int(time.time() * 1000)
         }

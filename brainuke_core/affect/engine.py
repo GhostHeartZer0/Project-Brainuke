@@ -188,5 +188,81 @@ class BrainukeCore:
         if d > 0.4: return "Commanding, Razor-Sharp Wit, Unfiltered"
         return "Observant, Dry, Candid"
 
+    def calculate_volition_salience(
+        self,
+        memory_resonance: float,
+        sensory_delta: float = 0.0,
+        dt_since_event: float = 0.0,
+        w_v: float = 1.0,
+        w_d: float = 1.2,
+        w_a: float = 0.4,
+        w_s: float = 0.3,
+        lambda_loud: float = 0.15,
+        lambda_vital: float = 0.001
+    ) -> Dict[str, Any]:
+        """
+        Refined Option 1: PAD-Vector Salience with Dynamic Resonance Coefficient.
+        - Thematic Threat: Evaluates perturbation of established equilibrium (Valence & Dominance).
+        - Loud vs Vital Differentiation:
+          - High Arousal (Loud) with low Memory Resonance decays rapidly via lambda_loud.
+          - High Memory Resonance (Vital) decays at near-zero lambda_vital, persisting in DMN.
+          - Pure arousal noise is dampened unless substantiated by thematic memory weight.
+        - Resonance Coefficient (R_m) dynamically scales with Memory Resonance.
+        """
+        # 1. Delta from baseline equilibrium
+        delta_v = abs(self.state.valence - self.mu['valence'])
+        delta_a = abs(self.state.arousal - self.mu['arousal'])
+        delta_d = abs(self.state.dominance - self.mu['dominance'])
+
+        # 2. Resonance Coefficient (R_m)
+        m = max(0.0, min(1.0, float(memory_resonance)))
+        r_m = 1.0 + (1.5 * m)
+
+        # 3. Dynamic Decay Rate (lambda) based on Vital vs Loud
+        loud_factor = (1.0 - m) * max(0.0, self.state.arousal)
+        effective_lambda = lambda_vital + (lambda_loud * loud_factor)
+        temporal_decay = math.exp(-effective_lambda * max(0.0, dt_since_event))
+
+        # 4. Thematic Threat (equilibrium perturbation)
+        arousal_threat = (delta_a ** 2) * (0.1 + 0.9 * m)
+        thematic_threat = math.sqrt(
+            w_v * (delta_v ** 2) +
+            w_d * (delta_d ** 2) +
+            w_a * arousal_threat
+        )
+
+        # 5. Salience Score (S)
+        vital_resonance = r_m * m
+        sensory_component = w_s * max(0.0, min(1.0, sensory_delta))
+        raw_salience = thematic_threat + vital_resonance + sensory_component
+        decayed_salience = raw_salience * temporal_decay
+
+        return {
+            "salience_score": decayed_salience,
+            "raw_salience": raw_salience,
+            "thematic_threat": thematic_threat,
+            "resonance_coefficient": r_m,
+            "memory_resonance": m,
+            "effective_decay_rate": effective_lambda,
+            "temporal_decay": temporal_decay,
+            "is_vital": m >= 0.5,
+            "is_loud": (self.state.arousal > 0.4) and (m < 0.3)
+        }
+
+    def should_trigger_volition(
+        self,
+        memory_resonance: float,
+        sensory_delta: float = 0.0,
+        dt_since_event: float = 0.0,
+        threshold: float = 0.85
+    ) -> bool:
+        """Evaluates whether current state crosses threshold theta for self-directed utterance."""
+        result = self.calculate_volition_salience(
+            memory_resonance=memory_resonance,
+            sensory_delta=sensory_delta,
+            dt_since_event=dt_since_event
+        )
+        return result["salience_score"] >= threshold
+
     def get_status(self):
         return f"V:{self.state.valence:.2f} A:{self.state.arousal:.2f} D:{self.state.dominance:.2f}"

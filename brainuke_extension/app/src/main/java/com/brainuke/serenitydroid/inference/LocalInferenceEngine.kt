@@ -5,6 +5,8 @@ import android.os.Build
 import android.os.Environment
 import android.util.Log
 import com.example.serenitydroid.jni.LlamaAndroid
+import com.brainuke.serenitydroid.data.ConversationEntity
+import com.brainuke.serenitydroid.data.MemoryNodeEntity
 import com.brainuke.serenitydroid.model.InferenceConfig
 import com.brainuke.serenitydroid.model.ModelLoadState
 import com.brainuke.serenitydroid.model.ModelType
@@ -266,10 +268,13 @@ class LocalInferenceEngine(
 
     /**
      * Executes local reflex evaluation against user input and current sensory telemetry.
+     * Incorporates context pruning over recent conversation turns and prioritized DMN thematic anchors.
      */
     suspend fun executeReflex(
         userInput: String,
-        telemetry: TelemetryPayload?
+        telemetry: TelemetryPayload?,
+        recentTurns: List<ConversationEntity> = emptyList(),
+        memoryNodes: List<MemoryNodeEntity> = emptyList()
     ): ReflexResponse = withContext(Dispatchers.Default) {
         val currentState = _loadState.value
 
@@ -294,6 +299,28 @@ class LocalInferenceEngine(
         val activeSystemPrompt = (currentConfig.customSystemPrompt
             ?: if (activeModel == ModelType.SECRET) CECILIA_SECRET_SYSTEM_PROMPT else CECILIA_NORMAL_SYSTEM_PROMPT).trim()
 
+        // 1. Pack prioritized thematic anchors (simmered DMN insights)
+        val anchorsText = if (memoryNodes.isNotEmpty()) {
+            val lines = memoryNodes.take(4).map { "- ${it.insight.trim()}" }
+            "\n[THEMATIC ANCHORS & DMN MEMORY]\n" + lines.joinToString("\n") + "\n"
+        } else ""
+
+        // 2. Mobile Context Pruning: keep recent turns within token budget
+        val charBudget = ((currentConfig.contextWindow.coerceAtLeast(1024) - currentConfig.maxTokens - 250) * 3.5).toInt()
+        val prunedTurns = mutableListOf<ConversationEntity>()
+        var accumulatedChars = activeSystemPrompt.length + anchorsText.length + sensoryContext.length + trimmedInput.length
+
+        // Traverse recent turns from newest to oldest to preserve immediate conversational context
+        for (turn in recentTurns.sortedByDescending { it.timestamp }) {
+            val turnChars = turn.userInput.length + turn.finalResponse.length
+            if (accumulatedChars + turnChars < charBudget) {
+                prunedTurns.add(0, turn) // restore chronological order
+                accumulatedChars += turnChars
+            } else {
+                break
+            }
+        }
+
         var nativeThought: String? = null
         var nativeSpeech: String? = null
 
@@ -303,13 +330,33 @@ class LocalInferenceEngine(
             val isGemma = modelNameLower.contains("gemma")
             val prompt = when {
                 isGemma4 -> {
-                    "<|turn>system\n$activeSystemPrompt\nSensory Context: $sensoryContext<turn|>\n<|turn>user\n$trimmedInput<turn|>\n<|turn>model\n"
+                    val sb = java.lang.StringBuilder()
+                    sb.append("<|turn>system\n$activeSystemPrompt$anchorsText\nSensory Context: $sensoryContext<turn|>\n")
+                    for (t in prunedTurns) {
+                        sb.append("<|turn>user\n${t.userInput.trim()}<turn|>\n")
+                        sb.append("<|turn>model\n${t.finalResponse.trim()}<turn|>\n")
+                    }
+                    sb.append("<|turn>user\n$trimmedInput<turn|>\n<|turn>model\n")
+                    sb.toString()
                 }
                 isGemma -> {
-                    "<start_of_turn>user\n$activeSystemPrompt\nSensory Context: $sensoryContext\n\n$trimmedInput<end_of_turn>\n<start_of_turn>model\n"
+                    val sb = java.lang.StringBuilder()
+                    sb.append("<start_of_turn>user\n$activeSystemPrompt$anchorsText\nSensory Context: $sensoryContext\n\n")
+                    for (t in prunedTurns) {
+                        sb.append("User: ${t.userInput.trim()}\nCecilia: ${t.finalResponse.trim()}\n\n")
+                    }
+                    sb.append("$trimmedInput<end_of_turn>\n<start_of_turn>model\n")
+                    sb.toString()
                 }
                 else -> {
-                    "<|im_start|>system\n$activeSystemPrompt\nSensory Context: $sensoryContext<|im_end|>\n<|im_start|>user\n$trimmedInput<|im_end|>\n<|im_start|>assistant\n"
+                    val sb = java.lang.StringBuilder()
+                    sb.append("<|im_start|>system\n$activeSystemPrompt$anchorsText\nSensory Context: $sensoryContext<|im_end|>\n")
+                    for (t in prunedTurns) {
+                        sb.append("<|im_start|>user\n${t.userInput.trim()}<|im_end|>\n")
+                        sb.append("<|im_start|>assistant\n${t.finalResponse.trim()}<|im_end|>\n")
+                    }
+                    sb.append("<|im_start|>user\n$trimmedInput<|im_end|>\n<|im_start|>assistant\n")
+                    sb.toString()
                 }
             }
             val controlPattern = Regex("""(?i)\[\/?eos\]|<\/?(?:eos|end_of_turn|start_of_turn|eot_id|im_end|im_start|s)>|<turn\|>|<\|turn(?:>|\b)|<channel\|>|<\|channel(?:>|\b)|<\|think\|>|<\|(?:im_end|im_start|eot_id|start_header_id|end_header_id|end_of_turn)\|?>""")

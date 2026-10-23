@@ -9,11 +9,30 @@ if getattr(sys, 'frozen', False):
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+parent_dir = os.path.dirname(BASE_DIR)
+
 SYSTEM_DIR = os.path.join(BASE_DIR, "System")
+if not os.path.isdir(SYSTEM_DIR) and os.path.isdir(os.path.join(parent_dir, "System")):
+    SYSTEM_DIR = os.path.join(parent_dir, "System")
+
 MEDIA_DIR = os.path.join(SYSTEM_DIR, "Media")
+if not os.path.isdir(MEDIA_DIR):
+    if os.path.isdir(os.path.join(parent_dir, "Media")):
+        MEDIA_DIR = os.path.join(parent_dir, "Media")
+    elif os.path.isdir(os.path.join(BASE_DIR, "Media")):
+        MEDIA_DIR = os.path.join(BASE_DIR, "Media")
+
 LIVE_DIR = os.path.join(BASE_DIR, "Live")
+if not os.path.isdir(LIVE_DIR) and os.path.isdir(os.path.join(parent_dir, "Live")):
+    LIVE_DIR = os.path.join(parent_dir, "Live")
+
 TOOLS_DIR = os.path.join(BASE_DIR, "Tools")
+if not os.path.isdir(TOOLS_DIR) and os.path.isdir(os.path.join(parent_dir, "Tools")):
+    TOOLS_DIR = os.path.join(parent_dir, "Tools")
+
 DOCS_DIR = os.path.join(BASE_DIR, "Docs")
+if not os.path.isdir(DOCS_DIR) and os.path.isdir(os.path.join(parent_dir, "Docs")):
+    DOCS_DIR = os.path.join(parent_dir, "Docs")
 
 # Core App Assets
 APP_ICON = os.path.join(SYSTEM_DIR, "serenity.ico")

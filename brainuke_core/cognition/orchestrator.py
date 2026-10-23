@@ -21,7 +21,9 @@ class OrchestrationResult:
     thought_stream: str
     final_response: str
     affect_impulse: Dict[str, float]
+    raw_response: str = ""
     param_updates: Optional[Dict[str, Any]] = None
+    context_metrics: Optional[Dict[str, Any]] = None
 
 class CognitiveOrchestrator:
     def __init__(
@@ -47,6 +49,15 @@ class CognitiveOrchestrator:
         self.llm = self.reasoning_llm
         self.memory_vault = memory_vault
         self.runner_manager = runner_manager
+        self.last_context_metrics: Dict[str, Any] = {
+            "system_tokens": 0,
+            "history_tokens": 0,
+            "user_tokens": 0,
+            "thought_tokens": 0,
+            "total_tokens": 0,
+            "context_window": 32768,
+            "context_pct": 0.0
+        }
 
     async def process_interaction(
         self,
@@ -82,9 +93,14 @@ class CognitiveOrchestrator:
 
         sampling_params = self.core.get_sampling_params()
         
-        # 1. PRE-PROCESS: Determine 'Interest', Grounding Nodes, Dynamic Mood & Intent Risk
         interest_scalar = self._calculate_interest(user_input, context)
-        grounding_nodes = self.memory_vault.get_recent_grounding(limit=6) if self.memory_vault else []
+        if self.memory_vault:
+            if hasattr(self.memory_vault, "get_grounding_for_prompt"):
+                grounding_nodes = self.memory_vault.get_grounding_for_prompt(user_input, limit=6)
+            else:
+                grounding_nodes = self.memory_vault.get_recent_grounding(limit=6)
+        else:
+            grounding_nodes = []
         intent_label, risk_score = self._evaluate_intent_and_risk(user_input)
         dynamic_mood = self._derive_dynamic_mood()
 
@@ -189,7 +205,13 @@ class CognitiveOrchestrator:
             f"{persona_section}"
             f"Current Affect: {self.core.get_status()}\n"
             f"Tone Modulation: {sampling_params.tone_descriptor}\n"
-            f"Speak directly to the user in your authentic voice.<turn|>\n"
+            f"[STRUCTURAL SPECIFICATION]\n"
+            f"You MUST format your output strictly as a structured cognitive response in two explicit stages:\n"
+            f"[STAGE 2: RAW UNFILTERED RESPONSE]\n"
+            f"<Your tactical, technical, or systemic deconstruction>\n\n"
+            f"[STAGE 3: REFINED RESPONSE]\n"
+            f"<Your direct authentic spoken dialogue to the user in Cecilia's voice>\n"
+            f"Never omit Stage 3. Deliver authentic spoken dialogue directly to the user.<turn|>\n"
             f"<|turn>user\n"
             f"{user_input}<turn|>\n"
             f"<|turn>model\n"
@@ -204,10 +226,12 @@ class CognitiveOrchestrator:
             "[DECONSTRUCTION", "[MOTIVE", "[SUBTEXT", "[STRATEGIC IMPLICATIONS",
             "[REASONING ENGINE", "[ANALYSIS_START"
         )
+        speech_stop = ["<turn|>", "<end_of_turn>", "<|turn>", "</turn>", "<eos>", "<|end|>"]
+        
         if on_speech_chunk and hasattr(self.persona_llm, "generate_stream"):
             speech_chunks = []
-            speech_stop = ["<turn|>", "<end_of_turn>", "<|turn>", "</turn>", "<eos>", "<|end|>"]
             in_thought_mode = False
+
             async for chunk in self.persona_llm.generate_stream(
                 final_prompt,
                 context=context,
@@ -240,23 +264,48 @@ class CognitiveOrchestrator:
                 n_predict=2048
             )
 
-        thought_stream, final_response = ThoughtIsolation().isolate(thought_stream, raw_response)
+        thought_stream, raw_response, final_response = ThoughtIsolation().isolate_stages(thought_stream, raw_response)
 
-        # If persona model produced only deconstruction in phase 3, trigger swift authentic speech pass
+        # If persona model produced only deconstruction in phase 2, trigger swift authentic speech pass
         if not final_response.strip():
             synthesis_prompt = (
-                f"{final_prompt}\n"
-                f"Respond to the user directly in Cecilia's authentic voice:\n"
+                f"{final_prompt}"
+                f"{raw_response}<turn|>\n"
+                f"<|turn>user\n"
+                f"Now deliver your authentic refined response directly to me:<turn|>\n"
+                f"<|turn>model\n"
+                f"[STAGE 3: REFINED RESPONSE]\n"
             )
-            raw_speech = await self.persona_llm.generate_text(
-                synthesis_prompt,
-                context=context,
-                sampling_params=sampling_params,
-                n_predict=1024
-            )
-            _, final_response = ThoughtIsolation().isolate(thought_stream, raw_speech)
-            if on_speech_chunk and final_response:
-                await on_speech_chunk(final_response)
+            
+            if on_speech_chunk and hasattr(self.persona_llm, "generate_stream"):
+                speech_chunks2 = []
+                async for chunk in self.persona_llm.generate_stream(
+                    synthesis_prompt,
+                    context=context,
+                    sampling_params=sampling_params,
+                    stop=speech_stop,
+                    n_predict=1024
+                ):
+                    clean_chunk = re.sub(r"<\|thought\|>|</?thought>|</?think>|<turn\|>|<end_of_turn>|<\|turn>[a-z_]*\n?", "", chunk)
+                    if clean_chunk:
+                        speech_chunks2.append(clean_chunk)
+                        await on_speech_chunk(clean_chunk)
+                raw_speech = "".join(speech_chunks2)
+            else:
+                raw_speech = await self.persona_llm.generate_text(
+                    synthesis_prompt,
+                    context=context,
+                    sampling_params=sampling_params,
+                    n_predict=1024
+                )
+                
+            _, synth_raw, final_response = ThoughtIsolation().isolate_stages(thought_stream, raw_speech)
+            if synth_raw:
+                raw_response = f"{raw_response}\n\n{synth_raw}".strip() if raw_response else synth_raw
+                
+            if not (on_speech_chunk and hasattr(self.persona_llm, "generate_stream")):
+                if on_speech_chunk and final_response:
+                    await on_speech_chunk(final_response)
         elif on_speech_chunk and not hasattr(self.persona_llm, "generate_stream"):
             await on_speech_chunk(final_response)
 
@@ -277,6 +326,7 @@ class CognitiveOrchestrator:
                     user_input=user_input,
                     thought_stream=thought_stream,
                     final_response=final_response,
+                    raw_response=raw_response,
                     affect_state={
                         "valence": self.core.state.valence,
                         "arousal": self.core.state.arousal,
@@ -306,12 +356,37 @@ class CognitiveOrchestrator:
                     guardrail_active=guardrail_active
                 )
 
+        # 5. CONTEXT WINDOW METRICS BREAKDOWN (System vs History vs User vs Thoughts)
+        sys_str = f"{CECILIA_CORE_PROMPT}\n{dynamic_mood}\n{persona_section}\n{analytical_section}"
+        hist_str = json.dumps(context) if context else ""
+        sys_toks = max(1, int(len(sys_str) / 3.8))
+        hist_toks = int(len(hist_str) / 3.8) if hist_str else 0
+        user_toks = max(1, int(len(user_input) / 3.8))
+        thought_toks = int(len(thought_stream) / 3.8) if thought_stream else 0
+        total_toks = sys_toks + hist_toks + user_toks + thought_toks
+        ctx_limit = getattr(sampling_params, "context_window", 32768)
+        self.last_context_metrics = {
+            "system_tokens": sys_toks,
+            "history_tokens": hist_toks,
+            "user_tokens": user_toks,
+            "thought_tokens": thought_toks,
+            "total_tokens": total_toks,
+            "context_window": ctx_limit,
+            "context_pct": round((total_toks / ctx_limit) * 100, 2) if ctx_limit > 0 else 0.0
+        }
+
         return OrchestrationResult(
             thought_stream=thought_stream,
             final_response=final_response,
             affect_impulse=sentiment_impulse,
-            param_updates=param_updates
+            raw_response=raw_response,
+            param_updates=param_updates,
+            context_metrics=self.last_context_metrics
         )
+
+    def get_context_metrics(self) -> Dict[str, Any]:
+        """Returns latest context utilization metrics."""
+        return getattr(self, "last_context_metrics", {})
 
     def _calculate_interest(self, user_input: str, context: List[Dict]) -> float:
         """Placeholder for semantic novelty detection."""

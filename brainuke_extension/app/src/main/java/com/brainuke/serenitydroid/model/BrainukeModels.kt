@@ -39,12 +39,16 @@ sealed class BrainukeEvent {
 
     data class SyncRequest(
         val source: String = "pc",
+        val action: String = "full",
+        val syncId: String? = null,
         override val timestamp: Long = System.currentTimeMillis()
     ) : BrainukeEvent()
 
     data class SyncUpdate(
         val lastSync: Long,
         val summary: String,
+        val status: String = "idle",
+        val syncId: String? = null,
         override val timestamp: Long = System.currentTimeMillis()
     ) : BrainukeEvent()
 
@@ -55,6 +59,15 @@ sealed class BrainukeEvent {
 
     data class SpeechChunk(
         val chunk: String,
+        override val timestamp: Long = System.currentTimeMillis()
+    ) : BrainukeEvent()
+
+    data class VolitionTrigger(
+        val salience: Double,
+        val topic: String,
+        val insight: String,
+        val isVital: Boolean = false,
+        val proactivePrompt: String = "",
         override val timestamp: Long = System.currentTimeMillis()
     ) : BrainukeEvent()
 
@@ -75,12 +88,28 @@ sealed class BrainukeEvent {
                     "thought_chunk" -> ThoughtChunk(chunk = json.optString("content", ""))
                     "speech_chunk" -> SpeechChunk(chunk = json.optString("content", ""))
                     "heartbeat" -> Heartbeat(state = json.optString("state", ""))
-                    "sync_request" -> SyncRequest(source = json.optString("source", "pc"))
+                    "volition_trigger" -> {
+                        val dataObj = json.optJSONObject("data") ?: json
+                        VolitionTrigger(
+                            salience = dataObj.optDouble("salience", 0.0),
+                            topic = dataObj.optString("topic", "general"),
+                            insight = dataObj.optString("insight", ""),
+                            isVital = dataObj.optBoolean("is_vital", false),
+                            proactivePrompt = dataObj.optString("proactive_prompt", "")
+                        )
+                    }
+                    "sync_request" -> SyncRequest(
+                        source = json.optString("source", "pc"),
+                        action = json.optString("action", "full"),
+                        syncId = if (json.has("sync_id")) json.optString("sync_id") else null
+                    )
                     "sync_update" -> {
                         val dataObj = json.optJSONObject("data") ?: JSONObject()
                         SyncUpdate(
                             lastSync = dataObj.optLong("timestamp", System.currentTimeMillis()),
-                            summary = dataObj.optString("summary", "")
+                            summary = dataObj.optString("summary", ""),
+                            status = dataObj.optString("status", "idle"),
+                            syncId = if (dataObj.has("sync_id")) dataObj.optString("sync_id") else null
                         )
                     }
                     "handoff" -> {

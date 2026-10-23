@@ -51,14 +51,17 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.sqrt
 
 /**
@@ -82,6 +85,27 @@ class SensoryService : Service(), SensorEventListener {
         LOCAL_REFLEX
     }
 
+    enum class CognitiveStatus {
+        DISCONNECTED,
+        WAITING,
+        THINKING
+    }
+
+    private val _throneCognitiveStatus = MutableStateFlow(CognitiveStatus.DISCONNECTED)
+    val throneCognitiveStatus: StateFlow<CognitiveStatus> = _throneCognitiveStatus.asStateFlow()
+
+    private val _mobileCognitiveStatus = MutableStateFlow(CognitiveStatus.WAITING)
+    val mobileCognitiveStatus: StateFlow<CognitiveStatus> = _mobileCognitiveStatus.asStateFlow()
+
+    private val _flushedTurns = MutableSharedFlow<Pair<String, ThoughtIsolator.IsolatedResult>>(replay = 10)
+    val flushedTurns: SharedFlow<Pair<String, ThoughtIsolator.IsolatedResult>> = _flushedTurns.asSharedFlow()
+
+    private val isFlushingBuffer = AtomicBoolean(false)
+    private var idleVolitionScheduler: IdleVolitionScheduler? = null
+    private var lastObservedLux: Float? = null
+    private var lastObservedCharging: Boolean = false
+    private var lastObservedBatteryPct: Int = -1
+
     @Volatile
     private var currentInferenceMode = InferenceMode.THRONE_OFFLOAD
 
@@ -95,6 +119,7 @@ class SensoryService : Service(), SensorEventListener {
     suspend fun evaluateInferenceOffload(): InferenceMode = withContext(Dispatchers.IO) {
         val client = throneClient
         if (client == null) {
+            _throneCognitiveStatus.value = CognitiveStatus.DISCONNECTED
             currentInferenceMode = InferenceMode.LOCAL_REFLEX
             return@withContext currentInferenceMode
         }
@@ -103,8 +128,15 @@ class SensoryService : Service(), SensorEventListener {
             val json = org.json.JSONObject(statusRes.getOrThrow())
             val latency = json.optLong("latency_ms", 999L)
             val isOnline = json.optString("status") == "online"
+            if (isOnline) {
+                _throneCognitiveStatus.value = CognitiveStatus.WAITING
+                serviceScope.launch { flushFailedPromptBuffer() }
+            } else {
+                _throneCognitiveStatus.value = CognitiveStatus.DISCONNECTED
+            }
             if (isOnline && latency < 250) InferenceMode.THRONE_OFFLOAD else InferenceMode.LOCAL_REFLEX
         } else {
+            _throneCognitiveStatus.value = CognitiveStatus.DISCONNECTED
             InferenceMode.LOCAL_REFLEX
         }
         currentInferenceMode
@@ -150,40 +182,88 @@ class SensoryService : Service(), SensorEventListener {
     /**
      * Processes user interactions, dynamically routing between Throne cloud/desktop offload
      * and on-device local reflex runner with strict thought/response isolation.
+     * Caches unanswered/failed prompts into SQLite failed_prompt_buffer upon 404, timeout, or model-not-loaded.
      */
     suspend fun processInteraction(userInput: String): ThoughtIsolator.IsolatedResult = withContext(Dispatchers.IO) {
+        idleVolitionScheduler?.recordActivity()
         val client = throneClient
         val mode = if (currentInferenceMode == InferenceMode.THRONE_OFFLOAD) evaluateInferenceOffload() else currentInferenceMode
 
-        if (mode == InferenceMode.THRONE_OFFLOAD && client != null) {
-            val throneRes = client.sendInteraction(userInput)
-            if (throneRes.isSuccess) {
-                try {
-                    val json = org.json.JSONObject(throneRes.getOrThrow())
-                    val rawThought = json.optString("thought", "")
-                    val rawResponse = json.optString("response", "...")
+        if (mode == InferenceMode.THRONE_OFFLOAD) {
+            if (client != null) {
+                _throneCognitiveStatus.value = CognitiveStatus.THINKING
+                val throneRes = client.sendInteraction(userInput)
+                _throneCognitiveStatus.value = CognitiveStatus.WAITING
 
-                    val isolated = ThoughtIsolator.isolate(rawThought, rawResponse)
+                if (throneRes.isSuccess) {
+                    try {
+                        val json = org.json.JSONObject(throneRes.getOrThrow())
+                        val rawThought = json.optString("thought", "")
+                        val rawResponse = json.optString("response", "...")
 
-                    syncRepository.queueConversationTurn(
-                        userInput = userInput,
-                        thoughtStream = isolated.thought,
-                        finalResponse = isolated.speech
+                        val isolated = ThoughtIsolator.isolate(rawThought, rawResponse)
+
+                        syncRepository.queueConversationTurn(
+                            userInput = userInput,
+                            thoughtStream = isolated.thought,
+                            finalResponse = isolated.speech
+                        )
+
+                        return@withContext isolated
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to parse Throne response: ${e.message}")
+                    }
+                } else {
+                    _throneCognitiveStatus.value = CognitiveStatus.DISCONNECTED
+                    val err = throneRes.exceptionOrNull()?.message ?: "Throne connection unreachable"
+                    Log.w(TAG, "Throne offload failed ($err). Buffering prompt to SQLite failed_prompt_buffer.")
+
+                    syncRepository.queueFailedPrompt(
+                        promptText = userInput,
+                        targetMode = "throne",
+                        failureReason = err
                     )
 
-                    return@withContext isolated
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to parse Throne response, falling back to local reflex: ${e.message}")
+                    return@withContext ThoughtIsolator.IsolatedResult(
+                        thought = "<thought>[Brainuke Backlog Engine] Network/Throne link failure ($err). Prompt cached in SQLite failed_prompt_buffer. Awaiting Throne ready state to flush.</thought>",
+                        speech = "I've preserved that thought in my local backlog buffer. The Throne is currently disconnected or unresponsive ($err), but as soon as it re-anchors and reports ready, I'll resume and answer automatically."
+                    )
                 }
             } else {
-                Log.w(TAG, "Throne offload failed: ${throneRes.exceptionOrNull()?.message}. Falling back to local reflex.")
+                _throneCognitiveStatus.value = CognitiveStatus.DISCONNECTED
+                syncRepository.queueFailedPrompt(
+                    promptText = userInput,
+                    targetMode = "throne",
+                    failureReason = "ThroneClient not attached"
+                )
+                return@withContext ThoughtIsolator.IsolatedResult(
+                    thought = "<thought>[Brainuke Backlog Engine] Throne client not attached. Prompt cached in SQLite failed_prompt_buffer.</thought>",
+                    speech = "Throne client is unattached. I've placed your thought in the SQLite backlog buffer for automated delivery once connected."
+                )
             }
         }
 
-        // Offline / Local Reflex Mode Fallback
+        // Offline / Local Reflex Mode
+        val localState = localInferenceEngine.loadState.value
+        if (localState !is ModelLoadState.Loaded) {
+            syncRepository.queueFailedPrompt(
+                promptText = userInput,
+                targetMode = "mobile",
+                failureReason = "model_not_loaded (${localState::class.simpleName})"
+            )
+            return@withContext ThoughtIsolator.IsolatedResult(
+                thought = "<thought>[Brainuke Backlog Engine] Mobile model not loaded (${localState::class.simpleName}). Prompt cached in SQLite failed_prompt_buffer.</thought>",
+                speech = "The on-device mobile model isn't loaded right now. I've cached your prompt in the local backlog buffer; it will process automatically once loaded."
+            )
+        }
+
+        _mobileCognitiveStatus.value = CognitiveStatus.THINKING
         val telemetry = gatherTelemetry()
-        val reflex = localInferenceEngine.executeReflex(userInput, telemetry)
+        val recentTurns = syncRepository.getRecentTurns(limit = 10)
+        val memoryNodes = syncRepository.getRecentMemoryNodes(limit = 5)
+        val reflex = localInferenceEngine.executeReflex(userInput, telemetry, recentTurns, memoryNodes)
         val isolated = ThoughtIsolator.isolate(reflex.thought, reflex.speech)
+        _mobileCognitiveStatus.value = CognitiveStatus.WAITING
 
         syncRepository.queueConversationTurn(
             userInput = userInput,
@@ -192,6 +272,85 @@ class SensoryService : Service(), SensorEventListener {
         )
 
         isolated
+    }
+
+    /**
+     * Flushes buffered prompts from SQLite failed_prompt_buffer sequentially once target engine is ready.
+     */
+    suspend fun flushFailedPromptBuffer(): Int = withContext(Dispatchers.IO) {
+        if (!isFlushingBuffer.compareAndSet(false, true)) return@withContext 0
+        try {
+            val pending = syncRepository.getPendingFailedPrompts()
+            if (pending.isEmpty()) return@withContext 0
+
+            var flushedCount = 0
+            val client = throneClient
+
+            for (item in pending) {
+                if (item.targetMode == "throne") {
+                    if (client == null) break
+                    val statusRes = client.checkCognitiveStatus()
+                    val isOnline = statusRes.isSuccess && try {
+                        org.json.JSONObject(statusRes.getOrThrow()).optString("status") == "online"
+                    } catch (_: Exception) { false }
+
+                    if (!isOnline) {
+                        syncRepository.recordFailedPromptRetry(item.id, "Throne offline during flush")
+                        break
+                    }
+
+                    _throneCognitiveStatus.value = CognitiveStatus.THINKING
+                    val throneRes = client.sendInteraction(item.promptText)
+                    _throneCognitiveStatus.value = CognitiveStatus.WAITING
+
+                    if (throneRes.isSuccess) {
+                        try {
+                            val json = org.json.JSONObject(throneRes.getOrThrow())
+                            val rawThought = json.optString("thought", "")
+                            val rawResponse = json.optString("response", "...")
+                            val isolated = ThoughtIsolator.isolate(rawThought, rawResponse)
+
+                            syncRepository.queueConversationTurn(
+                                userInput = item.promptText,
+                                thoughtStream = isolated.thought,
+                                finalResponse = isolated.speech
+                            )
+                            syncRepository.markFailedPromptStatus(item.id, "flushed")
+                            flushedCount++
+                            _flushedTurns.emit(Pair(item.promptText, isolated))
+                        } catch (e: Exception) {
+                            syncRepository.recordFailedPromptRetry(item.id, "Parse error: ${e.message}")
+                        }
+                    } else {
+                        val err = throneRes.exceptionOrNull()?.message ?: "Interact failure"
+                        syncRepository.recordFailedPromptRetry(item.id, err)
+                        break
+                    }
+                } else {
+                    if (localInferenceEngine.loadState.value !is ModelLoadState.Loaded) {
+                        syncRepository.recordFailedPromptRetry(item.id, "Mobile model not loaded")
+                        break
+                    }
+                    _mobileCognitiveStatus.value = CognitiveStatus.THINKING
+                    val telemetry = gatherTelemetry()
+                    val reflex = localInferenceEngine.executeReflex(item.promptText, telemetry)
+                    val isolated = ThoughtIsolator.isolate(reflex.thought, reflex.speech)
+                    _mobileCognitiveStatus.value = CognitiveStatus.WAITING
+
+                    syncRepository.queueConversationTurn(
+                        userInput = item.promptText,
+                        thoughtStream = isolated.thought,
+                        finalResponse = isolated.speech
+                    )
+                    syncRepository.markFailedPromptStatus(item.id, "flushed")
+                    flushedCount++
+                    _flushedTurns.emit(Pair(item.promptText, isolated))
+                }
+            }
+            flushedCount
+        } finally {
+            isFlushingBuffer.set(false)
+        }
     }
 
     // Sensors
@@ -229,6 +388,62 @@ class SensoryService : Service(), SensorEventListener {
         syncRepository = com.brainuke.serenitydroid.data.SyncRepository(database)
         startForegroundServiceNotification()
         initializeSensors()
+        initializeIdleScheduler()
+        observeLocalModelLoadState()
+    }
+
+    private fun initializeIdleScheduler() {
+        idleVolitionScheduler = IdleVolitionScheduler(serviceScope) { step, intervalMs ->
+            handleIdleVolitionTick(step, intervalMs)
+        }
+        idleVolitionScheduler?.start()
+    }
+
+    private suspend fun handleIdleVolitionTick(step: Int, intervalMs: Long) {
+        val currentLux = latestLightLux
+        val currentTelemetry = gatherTelemetry()
+
+        val luxShift = if (currentLux != null && lastObservedLux != null) {
+            Math.abs(currentLux - (lastObservedLux ?: 0f)) > 50f
+        } else false
+        val powerShift = currentTelemetry.isCharging != lastObservedCharging ||
+                (lastObservedBatteryPct >= 0 && Math.abs(currentTelemetry.batteryPct - lastObservedBatteryPct) >= 5)
+
+        lastObservedLux = currentLux
+        lastObservedCharging = currentTelemetry.isCharging
+        lastObservedBatteryPct = currentTelemetry.batteryPct
+
+        val hasNotableChange = luxShift || powerShift
+        Log.d(TAG, "[IdleVolitionTick]: step=$step, interval=${intervalMs / 1000}s, notable=$hasNotableChange")
+
+        // Mobile Reflex Volition Hook: notable sensory delta triggers proactive reflex impulse
+        if (hasNotableChange) {
+            val sensoryDelta = if (luxShift && powerShift) 0.9f else if (luxShift) 0.6f else 0.5f
+            val reflexEvent = BrainukeEvent.VolitionTrigger(
+                salience = (0.7 + sensoryDelta * 0.25).toDouble(),
+                topic = "sensory_reflex",
+                insight = "Ambient shift detected (luxShift=$luxShift, powerShift=$powerShift)",
+                isVital = false,
+                proactivePrompt = if (powerShift) "Power state shifted. Telemetry updated." else "Ambient lighting changed noticeably."
+            )
+            _downlinkEvents.emit(reflexEvent)
+            postVolitionNotification(reflexEvent)
+        }
+
+        flushFailedPromptBuffer()
+    }
+
+    private fun observeLocalModelLoadState() {
+        serviceScope.launch {
+            localInferenceEngine.loadState.collect { state ->
+                if (state is ModelLoadState.Loaded) {
+                    _mobileCognitiveStatus.value = CognitiveStatus.WAITING
+                    flushFailedPromptBuffer()
+                } else {
+                    _mobileCognitiveStatus.value = CognitiveStatus.DISCONNECTED
+                }
+            }
+        }
     }
 
     /**
@@ -240,6 +455,11 @@ class SensoryService : Service(), SensorEventListener {
         startDownlinkListener()
         startPeriodicTelemetry()
         startAudioStream()
+
+        serviceScope.launch {
+            evaluateInferenceOffload()
+            flushFailedPromptBuffer()
+        }
     }
 
     // --- 1. FOREGROUND NOTIFICATION ---
@@ -291,23 +511,63 @@ class SensoryService : Service(), SensorEventListener {
                     is BrainukeEvent.Speech -> Log.i(TAG, "[Spoken Voice]: ${processedEvent.content}")
                     is BrainukeEvent.ThoughtChunk -> Log.d(TAG, "[Thought Chunk]: ${processedEvent.chunk}")
                     is BrainukeEvent.SpeechChunk -> Log.d(TAG, "[Speech Chunk]: ${processedEvent.chunk}")
-                    is BrainukeEvent.Heartbeat -> Log.v(TAG, "[Heartbeat]: ${processedEvent.state}")
+                    is BrainukeEvent.Heartbeat -> {
+                        Log.v(TAG, "[Heartbeat]: ${processedEvent.state}")
+                        _throneCognitiveStatus.value = CognitiveStatus.WAITING
+                        serviceScope.launch(Dispatchers.IO) { flushFailedPromptBuffer() }
+                    }
                     is BrainukeEvent.SyncRequest -> {
-                        Log.i(TAG, "[Sync Request]: PC Throne requested bidirectional sync. Executing...")
+                        Log.i(TAG, "[Sync Request]: PC Throne requested sync (action=${processedEvent.action}, id=${processedEvent.syncId}). Executing...")
                         serviceScope.launch(Dispatchers.IO) {
                             try {
-                                syncRepository.executeSync(client)
+                                syncRepository.executeSync(client, action = processedEvent.action, syncId = processedEvent.syncId)
                             } catch (e: Exception) {
                                 Log.w(TAG, "Downlink-triggered sync failed: ${e.message}")
                             }
                         }
                     }
-                    is BrainukeEvent.SyncUpdate -> Log.i(TAG, "[Sync Update]: ${processedEvent.summary}")
-                    is BrainukeEvent.Error -> Log.e(TAG, "[Downlink Error]: ${processedEvent.message}")
+                    is BrainukeEvent.SyncUpdate -> {
+                        Log.i(TAG, "[Sync Update]: status=${processedEvent.status}, summary=${processedEvent.summary}")
+                        if (processedEvent.status == "delta_ready") {
+                            Log.i(TAG, "[Sync Update]: Simmer finished on PC Throne. Executing delta pull...")
+                            serviceScope.launch(Dispatchers.IO) {
+                                try {
+                                    syncRepository.executeSync(client, action = "pull_only", syncId = processedEvent.syncId)
+                                } catch (e: Exception) {
+                                    Log.w(TAG, "Delta pull failed: ${e.message}")
+                                }
+                            }
+                        }
+                    }
+                    is BrainukeEvent.VolitionTrigger -> {
+                        Log.i(TAG, "[Volition Proactive Push]: salience=${processedEvent.salience}, topic=${processedEvent.topic}")
+                        postVolitionNotification(processedEvent)
+                    }
+                    is BrainukeEvent.Error -> {
+                        Log.e(TAG, "[Downlink Error]: ${processedEvent.message}")
+                        _throneCognitiveStatus.value = CognitiveStatus.DISCONNECTED
+                    }
                     is BrainukeEvent.Unknown -> Log.w(TAG, "[Unknown Event]: ${processedEvent.rawType}")
                     else -> {}
                 }
             }
+        }
+    }
+
+    private fun postVolitionNotification(event: BrainukeEvent.VolitionTrigger) {
+        try {
+            val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            val channelId = "serenity_sensory_pipeline"
+            val notification: Notification = NotificationCompat.Builder(this, channelId)
+                .setContentTitle("Cecilia • Proactive Volition")
+                .setContentText(event.proactivePrompt.ifEmpty { event.insight })
+                .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                .setAutoCancel(true)
+                .build()
+            notificationManager.notify(1002, notification)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to post volition notification: ${e.message}")
         }
     }
 
@@ -558,6 +818,7 @@ class SensoryService : Service(), SensorEventListener {
             release()
         }
         sensorManager.unregisterListener(this)
+        idleVolitionScheduler?.stop()
         serviceScope.cancel()
     }
 

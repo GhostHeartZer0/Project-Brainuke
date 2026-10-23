@@ -4,6 +4,8 @@ import com.brainuke.serenitydroid.model.TelemetryPayload
 import com.brainuke.serenitydroid.network.ThroneClient
 import com.brainuke.serenitydroid.util.MessageBoardCrypto
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -20,6 +22,45 @@ class SyncRepository(private val database: BrainukeDatabase) {
     private val telemetryDao = database.telemetryDao()
     private val memoryNodeDao = database.memoryNodeDao()
     private val conversationDao = database.conversationDao()
+    private val failedPromptDao = database.failedPromptDao()
+    private val syncMutex = Mutex()
+
+    /**
+     * Caches an unanswered prompt into the failed_prompt_buffer SQLite queue.
+     */
+    suspend fun queueFailedPrompt(
+        promptText: String,
+        targetMode: String = "throne",
+        failureReason: String = ""
+    ): Long = withContext(Dispatchers.IO) {
+        val entity = FailedPromptEntity(
+            promptText = promptText,
+            targetMode = targetMode,
+            failureReason = failureReason,
+            timestamp = System.currentTimeMillis(),
+            status = "pending"
+        )
+        failedPromptDao.insert(entity)
+    }
+
+    suspend fun getPendingFailedPrompts(): List<FailedPromptEntity> = withContext(Dispatchers.IO) {
+        failedPromptDao.getPendingPrompts()
+    }
+
+    suspend fun markFailedPromptStatus(id: Long, status: String) = withContext(Dispatchers.IO) {
+        failedPromptDao.updateStatus(id, status)
+    }
+
+    suspend fun recordFailedPromptRetry(id: Long, reason: String) = withContext(Dispatchers.IO) {
+        failedPromptDao.recordRetry(id, reason)
+    }
+
+    fun observePendingFailedPromptCount(): Flow<Int> =
+        failedPromptDao.observePendingCount()
+
+    suspend fun getPendingFailedPromptCount(): Int = withContext(Dispatchers.IO) {
+        failedPromptDao.getPendingCount()
+    }
 
     /**
      * Queues incoming sensor telemetry into local Room SQLite database without blocking network.
@@ -64,6 +105,13 @@ class SyncRepository(private val database: BrainukeDatabase) {
      */
     suspend fun getRecentTurns(limit: Int = 50): List<ConversationEntity> = withContext(Dispatchers.IO) {
         conversationDao.getRecentTurns(limit)
+    }
+
+    /**
+     * Fetches recent distilled memory nodes (simmered insights) from local SQLite database.
+     */
+    suspend fun getRecentMemoryNodes(limit: Int = 10): List<MemoryNodeEntity> = withContext(Dispatchers.IO) {
+        memoryNodeDao.getRecentNodes(limit)
     }
 
     /**
@@ -125,88 +173,151 @@ class SyncRepository(private val database: BrainukeDatabase) {
 
     /**
      * Executes bidirectional synchronization between Android Room DB and PC Throne Memory Vault.
-     * 1. Pushes pending telemetry logs and local conversation turns to PC host pool.
-     * 2. Pulls newly distilled memory nodes and updates Android Room DB.
+     * Guaranteed single-flight via Mutex to prevent concurrency storms.
+     * Supports action = "full", "push_only", or "pull_only".
      */
-    suspend fun executeSync(client: ThroneClient): Result<SyncSummary> = withContext(Dispatchers.IO) {
+    suspend fun executeSync(
+        client: ThroneClient,
+        action: String = "full",
+        syncId: String? = null
+    ): Result<SyncSummary> = withContext(Dispatchers.IO) {
+        if (!syncMutex.tryLock()) {
+            return@withContext Result.success(
+                SyncSummary(
+                    pushedCount = 0,
+                    pulledCount = 0,
+                    conversationCount = 0,
+                    coreState = "Sync in progress (locked)"
+                )
+            )
+        }
+
         try {
-            // 1. PUSH: Collect unsynced telemetry logs and conversation turns
-            val unsyncedTelemetry = telemetryDao.getUnsynced(limit = 100)
-            val unsyncedTurns = conversationDao.getUnsynced(limit = 50)
             var pushedTelemetryCount = 0
             var pushedTurnCount = 0
+            var pulledNodesCount = 0
+            var pulledTurnsCount = 0
+            var coreState = "Idle"
 
-            if (unsyncedTelemetry.isNotEmpty() || unsyncedTurns.isNotEmpty()) {
-                val telemetryBatchArray = JSONArray()
-                unsyncedTelemetry.forEach { row ->
-                    telemetryBatchArray.put(row.toPayloadJson())
-                }
+            // 1. PUSH: Collect unsynced telemetry logs and conversation turns
+            if (action == "full" || action == "push_only") {
+                val unsyncedTelemetry = telemetryDao.getUnsynced(limit = 100)
+                val unsyncedTurns = conversationDao.getUnsynced(limit = 50)
 
-                val turnBatchArray = JSONArray()
-                unsyncedTurns.forEach { turn ->
-                    turnBatchArray.put(turn.toPayloadJson())
-                }
+                if (unsyncedTelemetry.isNotEmpty() || unsyncedTurns.isNotEmpty()) {
+                    val telemetryBatchArray = JSONArray()
+                    unsyncedTelemetry.forEach { row ->
+                        telemetryBatchArray.put(row.toPayloadJson())
+                    }
 
-                val pushBody = JSONObject().apply {
-                    put("items", telemetryBatchArray)
-                    put("conversation_turns", turnBatchArray)
-                }.toString()
+                    val turnBatchArray = JSONArray()
+                    unsyncedTurns.forEach { turn ->
+                        turnBatchArray.put(turn.toPayloadJson())
+                    }
 
-                val pushResult = client.pushSyncBatch(pushBody)
-                if (pushResult.isFailure) {
-                    return@withContext Result.failure(pushResult.exceptionOrNull()!!)
-                }
+                    val pushBody = JSONObject().apply {
+                        put("items", telemetryBatchArray)
+                        put("conversation_turns", turnBatchArray)
+                        if (syncId != null) {
+                            put("sync_id", syncId)
+                        }
+                    }.toString()
 
-                // Mark rows as synced in Room SQLite
-                if (unsyncedTelemetry.isNotEmpty()) {
-                    telemetryDao.markSynced(unsyncedTelemetry.map { it.id })
-                    pushedTelemetryCount = unsyncedTelemetry.size
-                }
-                if (unsyncedTurns.isNotEmpty()) {
-                    conversationDao.markSynced(unsyncedTurns.map { it.id })
-                    pushedTurnCount = unsyncedTurns.size
+                    val pushResult = client.pushSyncBatch(pushBody)
+                    if (pushResult.isFailure) {
+                        return@withContext Result.failure(pushResult.exceptionOrNull()!!)
+                    }
+
+                    // Mark rows as synced in Room SQLite
+                    if (unsyncedTelemetry.isNotEmpty()) {
+                        telemetryDao.markSynced(unsyncedTelemetry.map { it.id })
+                        pushedTelemetryCount = unsyncedTelemetry.size
+                    }
+                    if (unsyncedTurns.isNotEmpty()) {
+                        conversationDao.markSynced(unsyncedTurns.map { it.id })
+                        pushedTurnCount = unsyncedTurns.size
+                    }
                 }
             }
 
-            // 2. PULL: Check latest memory node timestamp and fetch delta pack
-            val latestTimestamp = memoryNodeDao.getLatestTimestamp() ?: 0L
-            val pullResult = client.pullSyncDelta(sinceEpochMs = latestTimestamp)
-            if (pullResult.isFailure) {
-                return@withContext Result.failure(pullResult.exceptionOrNull()!!)
-            }
+            // 2. PULL: Check latest sequence IDs and fetch delta pack
+            if (action == "full" || action == "pull_only") {
+                val latestTimestamp = memoryNodeDao.getLatestTimestamp() ?: 0L
+                val latestInsightId = memoryNodeDao.getLatestServerInsightId() ?: 0L
+                val latestTurnId = conversationDao.getLatestServerTurnId() ?: 0L
 
-            val pullResponseJson = JSONObject(pullResult.getOrThrow())
-            val deltaPack = pullResponseJson.optJSONArray("delta_pack") ?: JSONArray()
-            val coreState = pullResponseJson.optString("core_state", "Unknown")
-
-            val newNodes = mutableListOf<MemoryNodeEntity>()
-            for (i in 0 until deltaPack.length()) {
-                val item = deltaPack.getJSONObject(i)
-                newNodes.add(
-                    MemoryNodeEntity(
-                        serverInsightId = item.optLong("id"),
-                        insight = item.optString("insight"),
-                        emotionalShiftJson = item.optJSONObject("emotional_shift")?.toString() ?: "{}",
-                        worldDeltaJson = item.optJSONObject("world_delta")?.toString() ?: "{}",
-                        timestamp = item.optLong("timestamp", System.currentTimeMillis())
-                    )
+                val pullResult = client.pullSyncDelta(
+                    sinceEpochMs = latestTimestamp,
+                    sinceInsightId = latestInsightId,
+                    sinceTurnId = latestTurnId
                 )
-            }
+                if (pullResult.isFailure) {
+                    return@withContext Result.failure(pullResult.exceptionOrNull()!!)
+                }
 
-            if (newNodes.isNotEmpty()) {
-                memoryNodeDao.insertAll(newNodes)
+                val pullResponseJson = JSONObject(pullResult.getOrThrow())
+                val deltaPack = pullResponseJson.optJSONArray("delta_pack")
+                    ?: pullResponseJson.optJSONArray("insights")
+                    ?: JSONArray()
+                coreState = pullResponseJson.optString("core_state", "Idle")
+
+                val newNodes = mutableListOf<MemoryNodeEntity>()
+                for (i in 0 until deltaPack.length()) {
+                    val item = deltaPack.getJSONObject(i)
+                    newNodes.add(
+                        MemoryNodeEntity(
+                            serverInsightId = item.optLong("id"),
+                            insight = item.optString("insight"),
+                            emotionalShiftJson = item.optJSONObject("emotional_shift")?.toString() ?: "{}",
+                            worldDeltaJson = item.optJSONObject("world_delta")?.toString() ?: "{}",
+                            timestamp = item.optLong("timestamp", System.currentTimeMillis())
+                        )
+                    )
+                }
+
+                if (newNodes.isNotEmpty()) {
+                    memoryNodeDao.insertAll(newNodes)
+                    pulledNodesCount = newNodes.size
+                }
+
+                // Symmetrical Dialogue Pull: Ingest PC conversation turns
+                val pcTurns = pullResponseJson.optJSONArray("pc_turns") ?: JSONArray()
+                val newTurns = mutableListOf<ConversationEntity>()
+                for (i in 0 until pcTurns.length()) {
+                    val item = pcTurns.getJSONObject(i)
+                    newTurns.add(
+                        ConversationEntity(
+                            serverTurnId = item.optLong("id"),
+                            turnUuid = item.optString("turn_uuid", "turn_pc_${item.optLong("id")}"),
+                            userInput = item.optString("user_input"),
+                            thoughtStream = item.optString("thought_stream", ""),
+                            finalResponse = item.optString("final_response", ""),
+                            sourceDevice = item.optString("source_device", "pc"),
+                            affectStateJson = item.optJSONObject("affect_state")?.toString() ?: "{}",
+                            timestamp = item.optLong("timestamp", System.currentTimeMillis()),
+                            isSynced = true
+                        )
+                    )
+                }
+
+                if (newTurns.isNotEmpty()) {
+                    conversationDao.insertAll(newTurns)
+                    pulledTurnsCount = newTurns.size
+                }
             }
 
             Result.success(
                 SyncSummary(
                     pushedCount = pushedTelemetryCount,
-                    pulledCount = newNodes.size,
-                    conversationCount = pushedTurnCount,
+                    pulledCount = pulledNodesCount,
+                    conversationCount = if (action == "pull_only") pulledTurnsCount else pushedTurnCount,
                     coreState = coreState
                 )
             )
         } catch (e: Exception) {
             Result.failure(e)
+        } finally {
+            syncMutex.unlock()
         }
     }
 

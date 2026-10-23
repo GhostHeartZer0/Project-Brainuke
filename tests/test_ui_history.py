@@ -75,6 +75,91 @@ class TestUIHistoryTab(unittest.TestCase):
         self.assertIn("DMN Refined Reality Insight", content)
         self.assertIn("#WORLDVIEW", content)
 
+    def test_stage_drawer_flow_and_dual_line_titles(self):
+        comp = self.app._build_stage_drawer_component(
+            parent_widget=self.app.chat_text,
+            thought="Deep internal thoughts",
+            raw_response="Unfiltered tactical response",
+            speech="Refined authentic speech",
+            is_streaming=False
+        )
+
+        slaves = comp.pack_slaves()
+        self.assertGreaterEqual(len(slaves), 2)
+        btn_bar = slaves[0]
+
+        # 1. Left-to-right button flow: Stage 1 Thoughts -> Stage 2 Raw Response -> Stage 3 Refined Response
+        btn_slaves = btn_bar.pack_slaves()
+        self.assertEqual(len(btn_slaves), 3)
+        btn_thought, btn_raw, btn_speech = btn_slaves[0], btn_slaves[1], btn_slaves[2]
+
+        # Verify dual-line titles
+        self.assertEqual(btn_thought.cget("text"), "▶ Stage 1\nThoughts")
+        self.assertEqual(btn_raw.cget("text"), "▶ Stage 2\nRaw Response")
+        self.assertEqual(btn_speech.cget("text"), "▼ Stage 3\nRefined Response")
+
+        # 2. Top-to-bottom text flow:
+        # Initially only speech is open
+        content_slaves = [s for s in comp.pack_slaves() if s != btn_bar]
+        self.assertEqual(len(content_slaves), 1)
+
+        # Toggle thoughts open
+        btn_thought.invoke()
+        self.assertEqual(btn_thought.cget("text"), "▼ Stage 1\nThoughts")
+        content_slaves = [s for s in comp.pack_slaves() if s != btn_bar]
+        self.assertEqual(len(content_slaves), 2)
+        # Thought is on top, speech is below
+        self.assertIn("Deep internal thoughts", str(content_slaves[0].winfo_children()[0].cget("text")))
+
+        # Toggle raw response open
+        btn_raw.invoke()
+        self.assertEqual(btn_raw.cget("text"), "▼ Stage 2\nRaw Response")
+        content_slaves = [s for s in comp.pack_slaves() if s != btn_bar]
+        self.assertEqual(len(content_slaves), 3)
+
+        # Strict top-to-bottom order: 0: Thought, 1: Raw Response, 2: Refined Speech
+        self.assertIn("Deep internal thoughts", str(content_slaves[0].winfo_children()[0].cget("text")))
+        self.assertIn("RAW UNFILTERED", str(content_slaves[1].winfo_children()[0].cget("text")))
+        self.assertIn("Refined authentic speech", str(content_slaves[2].winfo_children()[0].cget("text")))
+
+    def test_streaming_turn_flow(self):
+        self.app._init_streaming_turn()
+        btn_bar = self.app.streaming_btn_bar
+        btn_slaves = btn_bar.pack_slaves()
+        self.assertEqual(len(btn_slaves), 3)
+
+        # Left-to-right buttons
+        self.assertEqual(btn_slaves[0], self.app.streaming_btn_thought)
+        self.assertEqual(btn_slaves[1], self.app.streaming_btn_raw)
+        self.assertEqual(btn_slaves[2], self.app.streaming_btn_speech)
+
+        # Dual-line button titles
+        self.assertEqual(self.app.streaming_btn_thought.cget("text"), "▼ Stage 1\nThoughts")
+        self.assertEqual(self.app.streaming_btn_raw.cget("text"), "▶ Stage 2\nRaw Response")
+        self.assertEqual(self.app.streaming_btn_speech.cget("text"), "▶ Stage 3\nRefined Response")
+
+        # Stream raw chunk -> auto-minimizes Stage 1, opens Stage 2
+        self.app._append_raw_chunk("Raw tactical chunk")
+        self.assertEqual(self.app.streaming_btn_thought.cget("text"), "▶ Stage 1\nThoughts")
+        self.assertEqual(self.app.streaming_btn_raw.cget("text"), "▼ Stage 2\nRaw Response")
+
+        # Stream speech chunk -> auto-minimizes Stage 2, opens Stage 3
+        self.app._append_speech_chunk("Refined dialogue")
+        self.assertEqual(self.app.streaming_btn_raw.cget("text"), "▶ Stage 2\nRaw Response")
+        self.assertEqual(self.app.streaming_btn_speech.cget("text"), "▼ Stage 3\nRefined Response")
+
+        # Toggle all open and verify top-to-bottom order
+        self.app.streaming_btn_thought.invoke()
+        self.app.streaming_btn_raw.invoke()
+        content_slaves = [s for s in self.app.streaming_drawer_frame.pack_slaves() if s != btn_bar]
+        self.assertEqual(len(content_slaves), 3)
+        self.assertEqual(content_slaves[0], self.app.streaming_box_thought)
+        self.assertEqual(content_slaves[1], self.app.streaming_box_raw)
+        self.assertEqual(content_slaves[2], self.app.streaming_box_speech)
+
+        # Finalize turn
+        self.app._finalize_streaming_turn(final_thought="Final thought", final_speech="Final speech", final_raw="Final raw")
+
 
 if __name__ == "__main__":
     unittest.main()
