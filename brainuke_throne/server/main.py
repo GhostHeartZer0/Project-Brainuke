@@ -975,28 +975,19 @@ async def set_model_path_endpoint(request: Request):
     # Path normalization
     normalized_path = os.path.normpath(os.path.abspath(raw_path))
 
-    # Path traversal protection: inline containment check against candidate model roots
+    # Path traversal protection: access filesystem only within validated prefix branch
     allowed_dirs = [os.path.normpath(os.path.abspath(str(d))) for d in pc_runner_manager.get_candidate_model_dirs()]
-    is_safe = False
     for safe_root in allowed_dirs:
         safe_prefix = safe_root if safe_root.endswith(os.sep) else safe_root + os.sep
-        if normalized_path.startswith(safe_prefix) or normalized_path.lower().startswith(safe_prefix.lower()):
-            is_safe = True
-            break
-        if normalized_path == safe_root or normalized_path.lower() == safe_root.lower():
-            is_safe = True
-            break
+        if normalized_path.startswith(safe_prefix) or normalized_path.lower().startswith(safe_prefix.lower()) or normalized_path == safe_root or normalized_path.lower() == safe_root.lower():
+            if not os.path.isfile(normalized_path):
+                raise HTTPException(status_code=400, detail="Model file not found on disk")
+            res = pc_runner_manager.set_custom_model_path(normalized_path)
+            if res.get("status") == "error":
+                raise HTTPException(status_code=400, detail=res.get("error"))
+            return res
 
-    if not is_safe:
-        raise HTTPException(status_code=403, detail="Model path outside permitted model directories")
-
-    if not os.path.isfile(normalized_path):
-        raise HTTPException(status_code=400, detail="Model file not found on disk")
-
-    res = pc_runner_manager.set_custom_model_path(normalized_path)
-    if res.get("status") == "error":
-        raise HTTPException(status_code=400, detail=res.get("error"))
-    return res
+    raise HTTPException(status_code=403, detail="Model path outside permitted model directories")
 
 @app.post("/api/v1/models/load")
 async def load_model_endpoint(request: Request):

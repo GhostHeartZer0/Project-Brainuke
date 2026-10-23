@@ -189,30 +189,22 @@ class PCRunnerManager:
         raw_path = str(model_path).strip()
         normalized_path = os.path.normpath(os.path.abspath(raw_path))
 
-        # Inline containment check recognized by CodeQL
-        is_safe = False
+        # Containment check: access filesystem only within validated prefix branch
         for base in self.get_candidate_model_dirs():
             safe_root = os.path.normpath(os.path.abspath(str(base)))
             safe_prefix = safe_root if safe_root.endswith(os.sep) else safe_root + os.sep
-            if normalized_path.startswith(safe_prefix) or normalized_path.lower().startswith(safe_prefix.lower()):
-                is_safe = True
-                break
-            if normalized_path == safe_root or normalized_path.lower() == safe_root.lower():
-                is_safe = True
-                break
+            if normalized_path.startswith(safe_prefix) or normalized_path.lower().startswith(safe_prefix.lower()) or normalized_path == safe_root or normalized_path.lower() == safe_root.lower():
+                if not os.path.isfile(normalized_path):
+                    return {"status": "error", "error": f"Model file not found on disk: {raw_path}"}
+                cfg = self._ensure_config()
+                target_id = model_id or self.get_active_model_id()
+                models = cfg.setdefault("pc_runner", {}).setdefault("models", {})
+                target_cfg = models.setdefault(target_id, {})
+                target_cfg["path"] = normalized_path
+                self._save_config(cfg)
+                return {"status": "updated", "active_model": target_id, "path": normalized_path}
 
-        if not is_safe:
-            return {"status": "error", "error": f"Model path outside permitted directories: {raw_path}"}
-        if not os.path.isfile(normalized_path):
-            return {"status": "error", "error": f"Model file not found on disk: {raw_path}"}
-        
-        cfg = self._ensure_config()
-        target_id = model_id or self.get_active_model_id()
-        models = cfg.setdefault("pc_runner", {}).setdefault("models", {})
-        target_cfg = models.setdefault(target_id, {})
-        target_cfg["path"] = normalized_path
-        self._save_config(cfg)
-        return {"status": "updated", "active_model": target_id, "path": normalized_path}
+        return {"status": "error", "error": f"Model path outside permitted directories: {raw_path}"}
 
     def select_model(self, alias_or_id: str, auto_reload: bool = True) -> Dict[str, Any]:
         """
