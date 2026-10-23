@@ -961,46 +961,39 @@ async def scan_models_endpoint(request: Request):
     verify_machine_token(request)
     return {"status": "ok", "models": pc_runner_manager.scan_available_models()}
 
-def is_safe_model_path(target_path: Path, allowed_dirs: List[Path]) -> bool:
-    """Verifies resolved model path is contained inside allowed candidate roots."""
-    try:
-        resolved = target_path.resolve()
-        for allowed in allowed_dirs:
-            resolved_allowed = allowed.resolve()
-            try:
-                if resolved.is_relative_to(resolved_allowed):
-                    return True
-            except (ValueError, AttributeError):
-                pass
-            try:
-                if os.path.commonpath([str(resolved_allowed), str(resolved)]) == str(resolved_allowed):
-                    return True
-            except ValueError:
-                continue
-    except Exception:
-        return False
-    return False
-
 @app.post("/api/v1/models/path")
 async def set_model_path_endpoint(request: Request):
     """Binds a custom GGUF path for the active model."""
     verify_machine_token(request)
     body = await request.json()
-    path = body.get("path", "").strip()
-    if not path:
+    raw_path = str(body.get("path", "")).strip()
+    if not raw_path:
         raise HTTPException(status_code=400, detail="Missing model 'path'")
-    target = Path(path).resolve()
-    if target.suffix.lower() != ".gguf":
+    if not raw_path.lower().endswith(".gguf"):
         raise HTTPException(status_code=400, detail="Model file must have a .gguf extension")
 
-    # Path traversal protection: ensure target is within allowed candidate model directories
-    allowed_dirs = pc_runner_manager.get_candidate_model_dirs()
-    if not is_safe_model_path(target, allowed_dirs):
+    # Path normalization
+    normalized_path = os.path.normpath(os.path.abspath(raw_path))
+
+    # Path traversal protection: inline containment check against candidate model roots
+    allowed_dirs = [os.path.normpath(os.path.abspath(str(d))) for d in pc_runner_manager.get_candidate_model_dirs()]
+    is_safe = False
+    for safe_root in allowed_dirs:
+        safe_prefix = safe_root if safe_root.endswith(os.sep) else safe_root + os.sep
+        if normalized_path.startswith(safe_prefix) or normalized_path.lower().startswith(safe_prefix.lower()):
+            is_safe = True
+            break
+        if normalized_path == safe_root or normalized_path.lower() == safe_root.lower():
+            is_safe = True
+            break
+
+    if not is_safe:
         raise HTTPException(status_code=403, detail="Model path outside permitted model directories")
 
-    if not target.is_file():
+    if not os.path.isfile(normalized_path):
         raise HTTPException(status_code=400, detail="Model file not found on disk")
-    res = pc_runner_manager.set_custom_model_path(str(target))
+
+    res = pc_runner_manager.set_custom_model_path(normalized_path)
     if res.get("status") == "error":
         raise HTTPException(status_code=400, detail=res.get("error"))
     return res

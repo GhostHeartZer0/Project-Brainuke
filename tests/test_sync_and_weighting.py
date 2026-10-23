@@ -15,7 +15,7 @@ from brainuke_core.memory.vault import MemoryVault
 from brainuke_core.security.key_vault import KeyVault
 from brainuke_throne.server.main import (
     sync_status_endpoint, sync_trigger, sync_simmer, get_history_feed,
-    stop_model_endpoint, last_sync_info, simmer_bus, pc_runner_manager,
+    stop_model_endpoint, set_model_path_endpoint, last_sync_info, simmer_bus, pc_runner_manager,
     sync_push, sync_pull
 )
 import brainuke_throne.server.main as main_server
@@ -279,6 +279,26 @@ class TestSyncAndWeighting(unittest.IsolatedAsyncioTestCase):
             mock_proc.terminate.assert_called_once()
         finally:
             pc_runner_manager._managed_process = orig_managed
+
+    async def test_set_model_path_endpoint_validation(self):
+        from fastapi import HTTPException
+        # Missing path
+        req1 = self._make_mock_request(body={"path": ""})
+        with self.assertRaises(HTTPException) as ctx1:
+            await set_model_path_endpoint(req1)
+        self.assertEqual(ctx1.exception.status_code, 400)
+
+        # Non-GGUF extension
+        req2 = self._make_mock_request(body={"path": "C:\\fake\\not_a_model.bin"})
+        with self.assertRaises(HTTPException) as ctx2:
+            await set_model_path_endpoint(req2)
+        self.assertEqual(ctx2.exception.status_code, 400)
+
+        # Path traversal / outside candidate dirs
+        req3 = self._make_mock_request(body={"path": "C:\\Windows\\System32\\cmd.gguf"})
+        with self.assertRaises(HTTPException) as ctx3:
+            await set_model_path_endpoint(req3)
+        self.assertEqual(ctx3.exception.status_code, 403)
 
     def test_turn_uuid_deduplication(self):
         """Ensures identical turn_uuid calls are deduplicated and idempotent."""
